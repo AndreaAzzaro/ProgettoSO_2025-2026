@@ -38,7 +38,7 @@ typedef struct{
 
 typedef struct{
     sem_t sem_tavoli_liberi;
-}STazioneRefezione;
+}StazioneRefezione;
 
 typedef struct{
     Config config;
@@ -59,5 +59,5 @@ typedef struct{
     StazioneDistribuzione coffee_dessert_station;
 
     StazioneCassa register_station;
-    STazioneRefezione seat_area;
+    StazioneRefezione seat_area;
 }SharedMensa;
