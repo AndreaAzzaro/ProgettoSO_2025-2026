@@ -7,6 +7,7 @@
 
 #include "config.h"
 #include "stats.h"
+#include "menu.h"
 
 #define SHM_NAME "/progetto_mensa_shm"
 
@@ -43,6 +44,7 @@ typedef struct{
 typedef struct{
     Config config;
     SimulazioneStats stats;
+    MensaMenu menu;
 
     pthread_mutex_t mutex_stats;
 
