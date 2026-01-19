@@ -6,82 +6,141 @@
 #define CONFIG_PATH "config/config.conf"
 #define MAX_LINE_LEN 256
 
-/**
- * @brief Funzione helper per rimuovere newline e spazi (opzionale, ma utile)
- * Qui ci fidiamo di sscanf che salta gli spazi bianchi automaticamente.
- */
+// 1. DEFINIAMO UN ENUM PER IDENTIFICARE LE CHIAVI
+// Questo trasforma le stringhe in numeri gestibili dallo switch
+typedef enum {
+    KEY_UNKNOWN = 0,
+    
+    // Quantities
+    KEY_N_WORKERS, KEY_N_USERS, KEY_N_NEW_USERS, KEY_N_PAUSE,
+    
+    // Seats
+    KEY_SEATS_PRIMI, KEY_SEATS_SECONDI, KEY_SEATS_COFFEE, KEY_SEATS_CASSA, KEY_TOTAL_SEATS,
+    
+    // Prices
+    KEY_PRICE_PRIMI, KEY_PRICE_SECONDI, KEY_PRICE_COFFEE,
+    
+    // Timings
+    KEY_SIM_DURATION, KEY_N_NANO_SECS, 
+    KEY_AVG_SERVICE_PRIMI, KEY_AVG_SERVICE_MAIN, KEY_AVG_SERVICE_COFFEE, 
+    KEY_AVG_SERVICE_CASSA, KEY_AVG_REFILL_TIME, KEY_STOP_DURATION,
+    
+    // Threshold
+    KEY_OVERLOAD_THRESHOLD
+} ConfigKey;
 
+// 2. CREIAMO UNA TABELLA DI MAPPING (LOOKUP TABLE)
+// Associa la stringa nel file al valore Enum corrispondente
+typedef struct {
+    const char *string_key;
+    ConfigKey enum_key;
+} KeyMap;
+
+static const KeyMap mapping_table[] = {
+    {"N_WORKERS", KEY_N_WORKERS},
+    {"N_USERS", KEY_N_USERS},
+    {"N_NEW_USERS", KEY_N_NEW_USERS},
+    {"N_PAUSE", KEY_N_PAUSE},
+    
+    {"SEATS_PRIMI", KEY_SEATS_PRIMI},
+    {"SEATS_SECONDI", KEY_SEATS_SECONDI},
+    {"SEATS_COFFEE", KEY_SEATS_COFFEE},
+    {"SEATS_CASSA", KEY_SEATS_CASSA},
+    {"TOTAL_SEATS", KEY_TOTAL_SEATS},
+    
+    {"PRICE_PRIMI", KEY_PRICE_PRIMI},
+    {"PRICE_SECONDI", KEY_PRICE_SECONDI},
+    {"PRICE_COFFEE", KEY_PRICE_COFFEE},
+    
+    {"SIM_DURATION", KEY_SIM_DURATION},
+    {"N_NANO_SECS", KEY_N_NANO_SECS},
+    {"AVG_SERVICE_PRIMI", KEY_AVG_SERVICE_PRIMI},
+    {"AVG_SERVICE_MAIN", KEY_AVG_SERVICE_MAIN},
+    {"AVG_SERVICE_COFFEE", KEY_AVG_SERVICE_COFFEE},
+    {"AVG_SERVICE_CASSA", KEY_AVG_SERVICE_CASSA},
+    {"AVG_REFILL_TIME", KEY_AVG_REFILL_TIME},
+    {"STOP_DURATION", KEY_STOP_DURATION},
+    
+    {"OVERLOAD_THRESHOLD", KEY_OVERLOAD_THRESHOLD},
+    
+    {NULL, KEY_UNKNOWN} // Sentinella di fine array
+};
+
+// 3. FUNZIONE DI RISOLUZIONE
+// Converte stringa -> Enum scorrendo la tabella
+ConfigKey resolve_key(const char *key) {
+    for (int i = 0; mapping_table[i].string_key != NULL; i++) {
+        if (strcmp(key, mapping_table[i].string_key) == 0) {
+            return mapping_table[i].enum_key;
+        }
+    }
+    return KEY_UNKNOWN;
+}
+
+// 4. IMPLEMENTAZIONE LOAD CONFIG CON SWITCH
 SimConfig loadConfig() {
     SimConfig cfg;
-    // Inizializziamo tutto a 0 per sicurezza
     memset(&cfg, 0, sizeof(SimConfig));
 
     FILE *file = fopen(CONFIG_PATH, "r");
     if (file == NULL) {
-        perror("ERRORE CRITICO: Impossibile aprire config/config.conf");
-        fprintf(stderr, "Assicurati di lanciare il programma dalla root del progetto!\n");
+        perror("ERRORE CRITICO: config/config.conf non trovato");
         exit(EXIT_FAILURE);
     }
 
     char line[MAX_LINE_LEN];
-    char key[100];
-    int int_val;
-    long long_val; // Per n_nano_secs
+    char key_str[100];
+    long val; // Usiamo long per tutto, poi castiamo
 
-    // Leggiamo riga per riga
     while (fgets(line, sizeof(line), file)) {
-        
-        // 1. Salta commenti (#) e righe vuote
-        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') {
-            continue;
-        }
+        // Salta commenti e righe vuote
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
 
-        // 2. Parsing: Cerchiamo pattern "CHIAVE = VALORE"
-        // Cerchiamo prima come long (per n_nano_secs)
-        if (sscanf(line, "%s = %ld", key, &long_val) == 2) {
-            // Nota: usiamo long_val anche per gli int, poi castiamo. 
-            // È sicuro se i numeri rientrano nell'int.
-
+        if (sscanf(line, "%s = %ld", key_str, &val) == 2) {
             
-            // QUANTITIES
-            if (strcmp(key, "N_WORKERS") == 0)        cfg.quantities.n_workers = (int)long_val;
-            else if (strcmp(key, "N_USERS") == 0)     cfg.quantities.n_users = (int)long_val;
-            else if (strcmp(key, "N_NEW_USERS") == 0) cfg.quantities.n_new_users = (int)long_val;
-            else if (strcmp(key, "N_PAUSE") == 0)     cfg.quantities.n_pause = (int)long_val;
+            // --- QUI AVVIENE LA MAGIA ---
+            switch (resolve_key(key_str)) {
+                
+                // Quantities
+                case KEY_N_WORKERS:     cfg.quantities.n_workers = (int)val; break;
+                case KEY_N_USERS:       cfg.quantities.n_users = (int)val; break;
+                case KEY_N_NEW_USERS:   cfg.quantities.n_new_users = (int)val; break;
+                case KEY_N_PAUSE:       cfg.quantities.n_pause = (int)val; break;
+                
+                // Seats
+                case KEY_SEATS_PRIMI:   cfg.seat.primi = (int)val; break;
+                case KEY_SEATS_SECONDI: cfg.seat.secondi = (int)val; break;
+                case KEY_SEATS_COFFEE:  cfg.seat.coffee = (int)val; break;
+                case KEY_SEATS_CASSA:   cfg.seat.cassa = (int)val; break;
+                case KEY_TOTAL_SEATS:   cfg.seat.seats = (int)val; break;
+                
+                // Prices
+                case KEY_PRICE_PRIMI:   cfg.price.primi = (int)val; break;
+                case KEY_PRICE_SECONDI: cfg.price.secondi = (int)val; break;
+                case KEY_PRICE_COFFEE:  cfg.price.coffee = (int)val; break;
+                
+                // Timings
+                case KEY_SIM_DURATION:       cfg.timing.sim_duration = (int)val; break;
+                case KEY_N_NANO_SECS:        cfg.timing.n_nano_secs = val; break; // No cast!
+                case KEY_AVG_SERVICE_PRIMI:  cfg.timing.avg_service_primi = (int)val; break;
+                case KEY_AVG_SERVICE_MAIN:   cfg.timing.avg_service_main = (int)val; break;
+                case KEY_AVG_SERVICE_COFFEE: cfg.timing.avg_service_coffee = (int)val; break;
+                case KEY_AVG_SERVICE_CASSA:  cfg.timing.avg_service_cassa = (int)val; break;
+                case KEY_AVG_REFILL_TIME:    cfg.timing.avg_refill_time = (int)val; break;
+                case KEY_STOP_DURATION:      cfg.timing.stop_duration = (int)val; break;
+                
+                // Threshold
+                case KEY_OVERLOAD_THRESHOLD: cfg.threshold.overload_threshold = (int)val; break;
 
-            // SEATS
-            else if (strcmp(key, "SEATS_PRIMI") == 0)   cfg.seat.primi = (int)long_val;
-            else if (strcmp(key, "SEATS_SECONDI") == 0) cfg.seat.secondi = (int)long_val;
-            else if (strcmp(key, "SEATS_COFFEE") == 0)  cfg.seat.coffee = (int)long_val;
-            else if (strcmp(key, "SEATS_CASSA") == 0)   cfg.seat.cassa = (int)long_val;
-            else if (strcmp(key, "TOTAL_SEATS") == 0)   cfg.seat.seats = (int)long_val;
-
-            // PRICES
-            else if (strcmp(key, "PRICE_PRIMI") == 0)   cfg.price.primi = (int)long_val;
-            else if (strcmp(key, "PRICE_SECONDI") == 0) cfg.price.secondi = (int)long_val;
-            else if (strcmp(key, "PRICE_COFFEE") == 0)  cfg.price.coffee = (int)long_val;
-
-            // TIMINGS
-            else if (strcmp(key, "SIM_DURATION") == 0)       cfg.timing.sim_duration = (int)long_val;
-            else if (strcmp(key, "N_NANO_SECS") == 0)        cfg.timing.n_nano_secs = long_val; // Qui niente cast!
-            else if (strcmp(key, "AVG_SERVICE_PRIMI") == 0)  cfg.timing.avg_service_primi = (int)long_val;
-            else if (strcmp(key, "AVG_SERVICE_MAIN") == 0)   cfg.timing.avg_service_main = (int)long_val;
-            else if (strcmp(key, "AVG_SERVICE_COFFEE") == 0) cfg.timing.avg_service_coffee = (int)long_val;
-            else if (strcmp(key, "AVG_SERVICE_CASSA") == 0)  cfg.timing.avg_service_cassa = (int)long_val;
-            else if (strcmp(key, "AVG_REFILL_TIME") == 0)    cfg.timing.avg_refill_time = (int)long_val;
-            else if (strcmp(key, "STOP_DURATION") == 0)      cfg.timing.stop_duration = (int)long_val;
-
-            // THRESHOLD
-            else if (strcmp(key, "OVERLOAD_THRESHOLD") == 0) cfg.threshold.overload_threshold = (int)long_val;
-
-            else {
-                // Opzionale: avvisa se c'è una chiave sconosciuta
-                printf("Warning: Chiave sconosciuta nel config: %s\n", key);
+                case KEY_UNKNOWN:
+                default:
+                    printf("Warning: Chiave ignorata nel config: %s\n", key_str);
+                    break;
             }
         }
     }
 
     fclose(file);
-    printf("Configurazione caricata con successo da %s\n", CONFIG_PATH);
+    printf("Configurazione caricata correttamente.\n");
     return cfg;
 }

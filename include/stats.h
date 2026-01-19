@@ -57,4 +57,6 @@ typedef struct {
     
 } SimulationStats;
 
+SimulationStats readStats(SharedMensa *shm);
 #endif
+

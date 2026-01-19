@@ -4,7 +4,7 @@
 typedef struct {
     int first_course;
     int second_course;
-    int coffee_dessert; 
+    int coffee_dessert;  
     int total;          
 } PlateCounts;
 
@@ -57,4 +57,6 @@ typedef struct {
     
 } SimulationStats;
 
+void readStats(SharedMensa *shm);
+void printStats(SharedMensa *shm);
 #endif
