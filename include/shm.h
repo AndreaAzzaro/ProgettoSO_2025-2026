@@ -1,40 +1,57 @@
+/**
+ * @file shm.h
+ * @brief Wrapper per la gestione della Memoria Condivisa (System V IPC).
+ * 
+ * Questo modulo fornisce un'astrazione sopra le primitive shmget, shmat, shmdt
+ * e shmctl per la gestione della memoria condivisa tra processi.
+ * 
+ * @see common.h per la struttura MainSharedMemory.
+ */
+
 #ifndef SHM_H
 #define SHM_H
 
-#include <sys/types.h> // per size_t
+#include <sys/types.h>
+#include <stddef.h>
+#include <stdbool.h>
+
+/* ==========================================================================
+ *                         SEZIONE: FUNZIONI PUBBLICHE
+ * ========================================================================== */
 
 /**
- * @brief Nome univoco del segmento di memoria condivisa.
- * Definirlo qui lega la libreria a questo progetto specifico.
+ * @brief Crea o ottiene un identificatore per un segmento di memoria condivisa.
+ * 
+ * @param key Chiave IPC (generata tramite ftok o IPC_PRIVATE).
+ * @param segment_size Dimensione totale del segmento in byte.
+ * @param segment_flags Flag di creazione e permessi (es. IPC_CREAT | 0666).
+ * @return int ID della memoria condivisa (shmid), o -1 in caso di errore.
  */
-#define SHM_NAME "/mensa_shm_project"
+int create_shared_memory_segment(key_t key, size_t segment_size, int segment_flags);
 
 /**
- * @brief Crea o apre un segmento di memoria condivisa POSIX.
- * * Questa funzione incapsula le chiamate a shm_open, ftruncate e mmap.
- * Se il segmento non esiste, lo crea. Se esiste, lo apre.
- * * @param name Il nome univoco della shared memory (deve iniziare con '/').
- * @param size La dimensione in byte da allocare (solitamente sizeof(SharedMensa)).
- * * @return void* Puntatore all'inizio della memoria condivisa mappata.
- * * @pre Il parametro 'name' non deve essere NULL.
- * @post Il puntatore ritornato è valido e pronto per la lettura/scrittura.
- * @note In caso di errore critico (es. permessi o memoria piena), 
- * la funzione stampa l'errore su stderr e termina il processo (exit).
+ * @brief Collega (attach) il segmento di memoria condivisa allo spazio di indirizzamento del processo.
+ * 
+ * @param shared_memory_id ID della memoria condivisa.
+ * @param is_read_only Se true, collega il segmento in sola lettura.
+ * @return void* Puntatore all'area di memoria collegata, NULL in caso di errore.
  */
-void* alloc_shared_memory(const char *name, size_t size);
+void *attach_shared_memory_segment(int shared_memory_id, bool is_read_only);
 
 /**
- * @brief Rilascia le risorse della memoria condivisa.
- * * Esegue l'operazione di detach (munmap) e, opzionalmente, 
- * la rimozione fisica del file (shm_unlink).
- * * @param ptr    Puntatore all'area di memoria da liberare (ottenuto da alloc).
- * @param size   La dimensione del segmento da rilasciare.
- * @param name   Il nome del segmento (necessario solo se unlink == 1).
- * @param unlink Flag booleana (0 o 1):
- * - 0: Esegue solo il detach (usato da Operatori/Utenti).
- * - 1: Esegue detach E distruzione del file (usato SOLO dal Responsabile).
- * * @pre 'ptr' deve essere un puntatore valido restituito da mmap.
+ * @brief Scollega (detach) il segmento di memoria condivisa dallo spazio di indirizzamento.
+ * 
+ * @param shared_memory_address Indirizzo di memoria restituito precedentemente da attach.
+ * @return int 0 in caso di successo, -1 in caso di errore.
  */
-void free_shared_memory(void *ptr, size_t size, const char *name, int unlink);
+int detach_shared_memory_segment(const void *shared_memory_address);
 
-#endif
+/**
+ * @brief Rimuove definitivamente il segmento di memoria condivisa dal sistema operativo.
+ * 
+ * @param shared_memory_id ID della memoria condivisa da eliminare.
+ * @return int 0 in caso di successo, -1 in caso di errore.
+ */
+int remove_shared_memory_segment(int shared_memory_id);
+
+#endif /* SHM_H */

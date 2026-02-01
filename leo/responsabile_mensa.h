@@ -1,7 +1,0 @@
-void readStats(SharedMemory *shm);
-
-
-
-
-
-
