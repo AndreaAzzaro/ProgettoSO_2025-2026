@@ -101,27 +101,33 @@ int connect_to_simulation(MainSharedMemory **shm_out, int *shmid_out) {
 
 int parse_users_count(int argc, char *argv[], MainSharedMemory *shm) {
     int users_to_add;
-    
+
     if (argc >= 2) {
-        users_to_add = atoi(argv[1]);
+        if (!safe_parse_int(argv[1], &users_to_add)) {
+            fprintf(stderr, "[ERROR] Numero utenti non valido: '%s'\n", argv[1]);
+            return -1;
+        }
     } else {
         users_to_add = shm->configuration.quantities.number_of_new_users_batch;
         printf("[ADD_USERS] Nessun valore specificato. Uso default: %d\n", users_to_add);
     }
 
     if (users_to_add <= 0) {
-        fprintf(stderr, "[ERROR] Numero utenti non valido (%d).\n", users_to_add);
+        fprintf(stderr, "[ERROR] Numero utenti deve essere positivo (%d).\n", users_to_add);
         return -1;
     }
-    
+
     return users_to_add;
 }
 
 int send_add_users_request(MainSharedMemory *shm, int users_count) {
     SimulationMessage msg;
     msg.message_type = MSG_TYPE_CONTROL;
-    ControlPayload *payload = (ControlPayload *)msg.message_text;
-    payload->users_count = users_count;
+
+    /* Usa memcpy invece di cast diretto per evitare alignment issues */
+    ControlPayload payload;
+    payload.users_count = users_count;
+    memcpy(msg.message_text, &payload, sizeof(ControlPayload));
 
     if (send_message_to_queue(shm->control_queue_id, &msg, sizeof(ControlPayload), 0) == -1) {
         fprintf(stderr, "[ERROR] Invio richiesta alla coda di controllo fallito.\n");
@@ -151,8 +157,10 @@ int wait_for_master_permission(MainSharedMemory *shm) {
 }
 
 void register_user_in_registry(MainSharedMemory *shm, pid_t pid, int group_index) {
+    sigset_t oldset;
+    block_sigchld(&oldset);  /* Protegge user_registry da modifiche concorrenti del signal handler */
     reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
-    
+
     bool registered = false;
     for (int r = 0; r < MAX_USERS_REGISTRY; r++) {
         if (shm->user_registry[r].pid == 0) {
@@ -162,9 +170,10 @@ void register_user_in_registry(MainSharedMemory *shm, pid_t pid, int group_index
             break;
         }
     }
-    
+
     release_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
-    
+    unblock_sigchld(&oldset);
+
     if (!registered) {
         fprintf(stderr, "[WARNING] Registro pieno. PID %d non tracciato.\n", pid);
     }
@@ -173,9 +182,12 @@ void register_user_in_registry(MainSharedMemory *shm, pid_t pid, int group_index
 void spawn_single_user(MainSharedMemory *shm, int shmid, int group_size, 
                        int sync_index, int member_index) {
     pid_t pid = fork();
-    
+
     if (pid == 0) {
-        setpgid(0, shm->process_group_pids[GROUP_USERS]);
+        if (setpgid(0, shm->process_group_pids[GROUP_USERS]) == -1) {
+            perror("[ERROR] setpgid fallita");
+            exit(EXIT_FAILURE);
+        }
 
         char shm_str[24], gsize_str[24], gindex_str[24], is_leader_str[8];
         sprintf(shm_str, "%d", shmid);
@@ -196,6 +208,7 @@ void spawn_single_user(MainSharedMemory *shm, int shmid, int group_size,
 
 int spawn_user_groups(MainSharedMemory *shm, int shmid, int total_users) {
     int users_spawned = 0;
+    sigset_t oldset;
 
     while (users_spawned < total_users) {
         int group_size = (rand() % MAX_USERS_PER_GROUP) + 1;
@@ -203,25 +216,42 @@ int spawn_user_groups(MainSharedMemory *shm, int shmid, int total_users) {
             group_size = total_users - users_spawned;
         }
 
+        block_sigchld(&oldset);  /* Protegge group_statuses da modifiche concorrenti del signal handler */
         reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
         int sync_index = find_free_group_index(shm);
-        
+
         if (sync_index == -1) {
             fprintf(stderr, "[ERROR] Pool gruppi saturo.\n");
             release_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
+            unblock_sigchld(&oldset);
             break;
         }
-        
+
         shm->group_statuses[sync_index].active_members = group_size;
         shm->group_statuses[sync_index].group_leader_pid = 0;
         release_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
+        unblock_sigchld(&oldset);
 
         for (int i = 0; i < group_size; i++) {
             spawn_single_user(shm, shmid, group_size, sync_index, i);
         }
-        
+
         users_spawned += group_size;
     }
+
+    /* Aggiorna il contatore degli utenti totali con il numero effettivo di utenti creati */
+    block_sigchld(&oldset);
+    reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
+    if (shm->current_total_users + users_spawned <= MAX_USERS_REGISTRY) {
+        shm->current_total_users += users_spawned;
+    } else {
+        shm->current_total_users = MAX_USERS_REGISTRY;
+    }
+
+    /* Decrementa il contatore delle operazioni pendenti per segnalare il completamento */
+    shm->pending_add_users_count--;
+    release_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
+    unblock_sigchld(&oldset);
 
     return users_spawned;
 }

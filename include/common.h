@@ -190,10 +190,11 @@ struct MainSharedMemory {
     int control_queue_id;               /**< ID Coda per richieste add_users */
     int current_total_users;           /**< Numero attuale di utenti nella simulazione */
     int add_users_flag;                /**< Flag per segnalare richieste di aggiunta utenti */
+    int pending_add_users_count;       /**< Numero di operazioni add_users in corso */
 
     int current_simulation_day;         /**< Giorno attuale della simulazione */
     int simulation_minutes_passed;      /**< Minuti simulati trascorsi dall'inizio del giorno */
-    int is_simulation_running;          /**< Flag globale (1: Attiva, 0: Arresto Totale) */
+    volatile int is_simulation_running; /**< Flag globale (1: Attiva, 0: Arresto Totale) - volatile per evitare caching dal compilatore */
     int current_simulation_status;      /**< Stato attuale (Aperto, In Chiusura, Disorder) */
 
     /** Registry per tracciamento PID -> Group (Proposta 2 Punto 2) */

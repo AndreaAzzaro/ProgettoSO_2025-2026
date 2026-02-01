@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
+#include <string.h>
 
 /* Includes del progetto */
 #include "operatore_cassa.h"
@@ -74,7 +75,12 @@ void init_cassiere(StatoCassiere *cassiere, int argc, char *argv[]) {
         fprintf(stderr, "Uso: %s <shm_id>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
-    cassiere->shared_memory_id = atoi(argv[1]);
+
+    if (!safe_parse_int(argv[1], &cassiere->shared_memory_id)) {
+        fprintf(stderr, "[ERROR] shm_id non valido: '%s'\n", argv[1]);
+        exit(EXIT_FAILURE);
+    }
+
     cassiere->total_customers_processed = 0;
     cassiere->daily_breaks_taken = 0;
 
@@ -87,10 +93,23 @@ void setup_cassiere_signals(void) {
     sa.sa_handler = handle_cassiere_signals;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
-    sigaction(SIGUSR1, &sa, NULL); /* Pausa */
-    sigaction(SIGUSR2, &sa, NULL); /* Fine Giorno */
-    sigaction(SIGTERM, &sa, NULL); /* Fine Sim */
-    sigaction(SIGINT,  &sa, NULL); /* Interrupt manuale */
+
+    if (sigaction(SIGUSR1, &sa, NULL) == -1) {
+        perror("[ERROR] sigaction(SIGUSR1) fallita");
+        exit(EXIT_FAILURE);
+    }
+    if (sigaction(SIGUSR2, &sa, NULL) == -1) {
+        perror("[ERROR] sigaction(SIGUSR2) fallita");
+        exit(EXIT_FAILURE);
+    }
+    if (sigaction(SIGTERM, &sa, NULL) == -1) {
+        perror("[ERROR] sigaction(SIGTERM) fallita");
+        exit(EXIT_FAILURE);
+    }
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("[ERROR] sigaction(SIGINT) fallita");
+        exit(EXIT_FAILURE);
+    }
 }
 
 void run_cassiere_simulation(StatoCassiere *cassiere) {
@@ -107,8 +126,9 @@ void run_cassiere_simulation(StatoCassiere *cassiere) {
 
         /* LOOP 2: Ciclo "Giornaliero" */
         while (local_daily_cycle_is_active) {
-            /* Competizione per la postazione cassa (Interrompibile) */
-            int res = reserve_sem(cassiere->shm_ptr->register_station.semaphore_set_id, STATION_SEM_AVAILABLE_POSTS);
+            /* Competizione per la postazione cassa (Interrompibile)
+             * Usa NO_UNDO per evitare ghost posts quando il cassiere muore dopo aver rilasciato manualmente */
+            int res = reserve_sem_no_undo(cassiere->shm_ptr->register_station.semaphore_set_id, STATION_SEM_AVAILABLE_POSTS);
             
             if (res != -1) {
                 is_at_work = 1;
@@ -161,25 +181,34 @@ void fase_lavoro_cassa(StatoCassiere *cassiere) {
         
         if (wait_res == 0 || (wait_res == -1 && errno != EINTR)) {
             /* Ricezione Dati Pagamento (MSQ Cassa) */
-            ssize_t result = receive_message_from_queue(cassiere->shm_ptr->register_station.message_queue_id, 
+            ssize_t result = receive_message_from_queue(cassiere->shm_ptr->register_station.message_queue_id,
                                                        &msg, sizeof(CashierPayload), MSG_TYPE_ORDER, 0);
-            
+
             if (result == -1) {
-                if (errno != EINTR) {
+                if (errno == EINTR) {
+                    /* Se interrotti da segnale, ri-controlliamo se il giorno è ancora attivo */
+                    if (!local_daily_cycle_is_active) {
+                        is_at_work = 0;
+                    }
+                    /* Altrimenti continuiamo il loop per riprovare */
+                } else {
+                    /* Altri errori: usciamo dal turno */
                     is_at_work = 0;
                 }
-            } else {   
-                CashierPayload *payload = (CashierPayload *)msg.message_text;
+            } else {
+                /* Usa memcpy invece di cast diretto per evitare alignment issues */
+                CashierPayload payload;
+                memcpy(&payload, msg.message_text, sizeof(CashierPayload));
                 double amount = 0.0;
 
                 /* [PUNTO 4.1] Calcolo Importo in base ai prezzi configurati */
-                if (payload->had_first)  amount += cassiere->shm_ptr->configuration.prices.price_first_course;
-                if (payload->had_second) amount += cassiere->shm_ptr->configuration.prices.price_second_course;
-                if (payload->want_coffee) amount += cassiere->shm_ptr->configuration.prices.price_coffee_dessert;
+                if (payload.had_first)  amount += cassiere->shm_ptr->configuration.prices.price_first_course;
+                if (payload.had_second) amount += cassiere->shm_ptr->configuration.prices.price_second_course;
+                if (payload.want_coffee) amount += cassiere->shm_ptr->configuration.prices.price_coffee_dessert;
 
                 /* Applicazione Sconto Ticket (es. 50% di sconto se ticket validato) */
-                if (payload->has_discount) {
-                    amount *= 0.5; 
+                if (payload.has_discount) {
+                    amount *= 0.5;
                 }
 
                 /* [PUNTO 4.2] Aggiornamento Incassi (Protezione Mutex) */
@@ -200,12 +229,12 @@ void fase_lavoro_cassa(StatoCassiere *cassiere) {
                 cassiere->total_customers_processed++;
 
                 /* Invio Ricevuta (Feedback all'Utente) */
-                msg.message_type = payload->user_pid;
-                send_message_to_queue(cassiere->shm_ptr->register_station.message_queue_id, 
+                msg.message_type = payload.user_pid;
+                send_message_to_queue(cassiere->shm_ptr->register_station.message_queue_id,
                                      &msg, sizeof(CashierPayload), 0);
-                
-                printf("[CASSIERE] PID %d: Gestito Utente %d. Incassato: %.2f EUR.\n", 
-                       getpid(), payload->user_pid, amount);
+
+                printf("[CASSIERE] PID %d: Gestito Utente %d. Incassato: %.2f EUR.\n",
+                       getpid(), payload.user_pid, amount);
             }
         }
 }

@@ -29,7 +29,13 @@
  */
 SimulationStatistics collect_simulation_statistics(struct MainSharedMemory *shared_memory_ptr) {
     SimulationStatistics stats;
-    int num_days = shared_memory_ptr->current_simulation_day + 1;
+    int num_days = shared_memory_ptr->current_simulation_day;
+    /* Se la simulazione è ancora entro i limiti, aggiungiamo 1 (giorno corrente).
+       Se ha superato i limiti (fine simulazione), blocchiamo alla durata massima. */
+    if (num_days < shared_memory_ptr->configuration.timings.simulation_duration_days) {
+        num_days++;
+    }
+    if (num_days <= 0) num_days = 1;
 
     /* 1. Protocollo di Accesso Sicuro (Sez 5.1 Consegna) */
     reserve_sem(shared_memory_ptr->semaphore_mutex_id, MUTEX_SIMULATION_STATS);

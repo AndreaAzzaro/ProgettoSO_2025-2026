@@ -100,35 +100,40 @@ SimulationMenu load_simulation_menu() {
 
             /* Parsing: Identificatore categoria (P, S, C, D, B) e Nome Piatto */
             if (sscanf(line_buffer, "%3s %31s", type_identifier, dish_name) == 2) {
-                
+
                 switch (resolve_menu_category_key(type_identifier)) {
                     case CATEGORY_KEY_FIRST:
                         if (menu_data.number_of_first_courses < MAX_DISHES_PER_CATEGORY) {
-                            strcpy(menu_data.first_courses[menu_data.number_of_first_courses].name, dish_name);
+                            strncpy(menu_data.first_courses[menu_data.number_of_first_courses].name, dish_name, MAX_DISH_NAME_LENGTH - 1);
+                            menu_data.first_courses[menu_data.number_of_first_courses].name[MAX_DISH_NAME_LENGTH - 1] = '\0';
                             menu_data.number_of_first_courses++;
                         }
                         break;
                     case CATEGORY_KEY_SECOND:
                         if (menu_data.number_of_second_courses < MAX_DISHES_PER_CATEGORY) {
-                            strcpy(menu_data.second_courses[menu_data.number_of_second_courses].name, dish_name);
+                            strncpy(menu_data.second_courses[menu_data.number_of_second_courses].name, dish_name, MAX_DISH_NAME_LENGTH - 1);
+                            menu_data.second_courses[menu_data.number_of_second_courses].name[MAX_DISH_NAME_LENGTH - 1] = '\0';
                             menu_data.number_of_second_courses++;
                         }
                         break;
                     case CATEGORY_KEY_SIDE:
                         if (menu_data.number_of_side_courses < MAX_DISHES_PER_CATEGORY) {
-                            strcpy(menu_data.side_courses[menu_data.number_of_side_courses].name, dish_name);
+                            strncpy(menu_data.side_courses[menu_data.number_of_side_courses].name, dish_name, MAX_DISH_NAME_LENGTH - 1);
+                            menu_data.side_courses[menu_data.number_of_side_courses].name[MAX_DISH_NAME_LENGTH - 1] = '\0';
                             menu_data.number_of_side_courses++;
                         }
                         break;
                     case CATEGORY_KEY_DESSERT:
                         if (menu_data.number_of_dessert_courses < MAX_DISHES_PER_CATEGORY) {
-                            strcpy(menu_data.dessert_courses[menu_data.number_of_dessert_courses].name, dish_name);
+                            strncpy(menu_data.dessert_courses[menu_data.number_of_dessert_courses].name, dish_name, MAX_DISH_NAME_LENGTH - 1);
+                            menu_data.dessert_courses[menu_data.number_of_dessert_courses].name[MAX_DISH_NAME_LENGTH - 1] = '\0';
                             menu_data.number_of_dessert_courses++;
                         }
                         break;
                     case CATEGORY_KEY_BEVERAGE:
                         if (menu_data.number_of_beverage_courses < MAX_DISHES_PER_CATEGORY) {
-                            strcpy(menu_data.beverage_courses[menu_data.number_of_beverage_courses].name, dish_name);
+                            strncpy(menu_data.beverage_courses[menu_data.number_of_beverage_courses].name, dish_name, MAX_DISH_NAME_LENGTH - 1);
+                            menu_data.beverage_courses[menu_data.number_of_beverage_courses].name[MAX_DISH_NAME_LENGTH - 1] = '\0';
                             menu_data.number_of_beverage_courses++;
                         }
                         break;

@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <errno.h>
+#include <limits.h>
 
 /* Includes del progetto */
 #include "utils.h"
@@ -98,7 +99,54 @@ void simulate_time_passage(int units_to_wait, long nanoseconds_per_tick) {
     while (nanosleep(&requested_time, &requested_time) == -1) {
         if (errno != EINTR) {
             /* Errore critico non dovuto a segnali */
-            break; 
+            break;
         }
     }
+}
+
+/* ==========================================================================
+ *                         SEZIONE: PARSING SICURO
+ * ========================================================================== */
+
+/**
+ * Converte una stringa in intero con validazione completa.
+ * A differenza di atoi(), rileva errori e overflow.
+ */
+bool safe_parse_int(const char *str, int *out_value) {
+    if (str == NULL || out_value == NULL) {
+        return false;
+    }
+
+    /* Controllo stringa vuota */
+    if (str[0] == '\0') {
+        return false;
+    }
+
+    char *endptr;
+    errno = 0;
+    long val = strtol(str, &endptr, 10);
+
+    /* Verifica errori di conversione */
+    if (errno == ERANGE) {
+        /* Overflow o underflow */
+        return false;
+    }
+
+    if (endptr == str) {
+        /* Nessun carattere numerico trovato */
+        return false;
+    }
+
+    if (*endptr != '\0') {
+        /* Caratteri extra dopo il numero */
+        return false;
+    }
+
+    if (val < INT_MIN || val > INT_MAX) {
+        /* Fuori dal range di int */
+        return false;
+    }
+
+    *out_value = (int)val;
+    return true;
 }

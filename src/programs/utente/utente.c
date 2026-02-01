@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <time.h>
 #include <stdbool.h>
+#include <string.h>
 
 /* Includes del progetto */
 #include "utente.h"
@@ -67,15 +68,33 @@ int main(int argc, char *argv[]) {
 
 void init_utente(StatoUtente *utente, int argc, char *argv[]) {
     (void)argc;
-    
+
     /* Parsing parametri da linea di comando */
-    utente->shared_memory_id = atoi(argv[1]);
-    utente->group_size = atoi(argv[2]);
-    int sync_index = atoi(argv[3]);
-    utente->is_group_leader = (atoi(argv[4]) == 1);
-    
+    if (!safe_parse_int(argv[1], &utente->shared_memory_id)) {
+        fprintf(stderr, "[ERROR] shm_id non valido: '%s'\n", argv[1]);
+        exit(EXIT_FAILURE);
+    }
+
+    if (!safe_parse_int(argv[2], &utente->group_size)) {
+        fprintf(stderr, "[ERROR] group_size non valido: '%s'\n", argv[2]);
+        exit(EXIT_FAILURE);
+    }
+
+    int sync_index;
+    if (!safe_parse_int(argv[3], &sync_index)) {
+        fprintf(stderr, "[ERROR] sync_index non valido: '%s'\n", argv[3]);
+        exit(EXIT_FAILURE);
+    }
+
+    int is_leader_int;
+    if (!safe_parse_int(argv[4], &is_leader_int)) {
+        fprintf(stderr, "[ERROR] is_leader non valido: '%s'\n", argv[4]);
+        exit(EXIT_FAILURE);
+    }
+    utente->is_group_leader = (is_leader_int == 1);
+
     /* Group ID basato sull'indice nel pool di sincronizzazione */
-    utente->group_id = sync_index; 
+    utente->group_id = sync_index;
 
     /* Connessione alla memoria condivisa */
     utente->shm_ptr = attach_to_simulation_shared_memory(utente->shared_memory_id);
@@ -242,10 +261,11 @@ void fase_ritiro_formale(StatoUtente *utente) {
     }
     release_sem(utente->shm_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
 
-    /* Sblocco semafori di gruppo per evitare deadlock degli altri membri */
-    int base_sem = s_idx * GROUP_SEMS_PER_ENTRY;
-    reserve_sem_no_undo(utente->shm_ptr->group_sync_semaphore_id, base_sem + GROUP_SEM_PRE_CASHIER);
-    reserve_sem_no_undo(utente->shm_ptr->group_sync_semaphore_id, base_sem + GROUP_SEM_EXIT);
+    /*
+     * Compensazione semafori di gruppo rimossa: ora usiamo SEM_UNDO sui semafori di gruppo
+     * (vedi reserve_sem_interruptible), quindi il kernel compensa automaticamente quando
+     * il processo esce, evitando double-decrement.
+     */
 }
 
 void fase_riunione_gruppo(StatoUtente *utente) {
@@ -276,14 +296,16 @@ void fase_pagamento_cassa(StatoUtente *utente, bool p1, bool p2) {
     clock_gettime(CLOCK_MONOTONIC, &start_t);
 
     SimulationMessage msg;
-    msg.message_type = MSG_TYPE_ORDER; 
-    
-    CashierPayload *payload = (CashierPayload *)msg.message_text;
-    payload->user_pid = getpid();
-    payload->had_first = p1;
-    payload->had_second = p2;
-    payload->want_coffee = true; 
-    payload->has_discount = utente->ticket_is_validated;
+    msg.message_type = MSG_TYPE_ORDER;
+
+    /* Usa memcpy invece di cast diretto per evitare alignment issues */
+    CashierPayload payload;
+    payload.user_pid = getpid();
+    payload.had_first = p1;
+    payload.had_second = p2;
+    payload.want_coffee = true;
+    payload.has_discount = utente->ticket_is_validated;
+    memcpy(msg.message_text, &payload, sizeof(CashierPayload));
 
     printf("[UTENTE] PID %d: In coda alla Cassa...\n", getpid());
 
@@ -440,14 +462,24 @@ void setup_utente_signals(void) {
     sa.sa_handler = handle_utente_signals;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
-    sigaction(SIGUSR2, &sa, NULL); /* Fine Giorno */
-    sigaction(SIGTERM, &sa, NULL); /* Terminazione Master */
-    sigaction(SIGINT,  &sa, NULL); /* Interruzione manuale */
+
+    if (sigaction(SIGUSR2, &sa, NULL) == -1) {
+        perror("[ERROR] sigaction(SIGUSR2) fallita");
+        exit(EXIT_FAILURE);
+    }
+    if (sigaction(SIGTERM, &sa, NULL) == -1) {
+        perror("[ERROR] sigaction(SIGTERM) fallita");
+        exit(EXIT_FAILURE);
+    }
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("[ERROR] sigaction(SIGINT) fallita");
+        exit(EXIT_FAILURE);
+    }
 }
 
 void genera_identita_casuale(StatoUtente *utente) {
-    /* PID % 5 != 0 garantisce circa l'80% di utenti con ticket sconto */
-    utente->has_ticket = ((getpid() % 5) != 0);
+    /* Genera casualmente has_ticket con probabilità 80% (era deterministico prima) */
+    utente->has_ticket = (rand() % 100) < 80;
     
     int n_primi = utente->shm_ptr->food_menu.number_of_first_courses;
     int n_secondi = utente->shm_ptr->food_menu.number_of_second_courses;
@@ -461,11 +493,19 @@ void genera_identita_casuale(StatoUtente *utente) {
 }
 
 ssize_t receive_message_with_soft_timeout(int queue_id, SimulationMessage *msg, size_t size, long type) {
+    /* Usa msgrcv() bloccante invece di busy-wait per efficienza.
+     * Se interrotto da segnale (EINTR), ricontrolla local_daily_cycle_is_active. */
     while (local_daily_cycle_is_active) {
-        ssize_t res = receive_message_from_queue(queue_id, msg, size, type, IPC_NOWAIT);
-        if (res != -1) return res;
-        if (errno != ENOMSG) return -1;
-        usleep(5000); /* 5ms prima del retry */
+        ssize_t res = receive_message_from_queue(queue_id, msg, size, type, 0);
+        if (res != -1) {
+            return res;
+        }
+        /* Se interrotto da segnale, rientra nel loop e ricontrolla local_daily_cycle_is_active */
+        if (errno == EINTR) {
+            continue;
+        }
+        /* Altri errori sono fatali */
+        return -1;
     }
     return -1;
 }
@@ -476,13 +516,19 @@ bool fase_checkout_piatto(StatoUtente *utente, FoodDistributionStation *stazione
     
     SimulationMessage msg;
     msg.message_type = MSG_TYPE_ORDER;
-    StationPayload *pay = (StationPayload *)msg.message_text;
-    pay->user_pid = getpid();
-    pay->dish_index = *choice;
-    pay->status = 0;
+
+    /* Usa memcpy invece di cast diretto per evitare alignment issues */
+    StationPayload pay;
+    pay.user_pid = getpid();
+    pay.dish_index = *choice;
+    pay.status = 0;
+    memcpy(msg.message_text, &pay, sizeof(StationPayload));
 
     if (send_message_to_queue(stazione->message_queue_id, &msg, sizeof(StationPayload), 0) == -1) return false;
     if (receive_message_with_soft_timeout(stazione->message_queue_id, &msg, sizeof(StationPayload), getpid()) == -1) return false;
+
+    /* Copia la risposta dal buffer */
+    memcpy(&pay, msg.message_text, sizeof(StationPayload));
 
     if (!local_daily_cycle_is_active) return false;
 
@@ -490,7 +536,7 @@ bool fase_checkout_piatto(StatoUtente *utente, FoodDistributionStation *stazione
     double w_min = get_simulated_minutes(s_t, e_t, utente->shm_ptr->configuration.timings.nanoseconds_per_tick);
     update_wait_time_stat(utente, w_min, stazione_tipo);
 
-    if (pay->status == ORDER_STATUS_SERVED) {
+    if (pay.status == ORDER_STATUS_SERVED) {
         printf("[UTENTE] PID %d: Piatto %d ricevuto.\n", getpid(), *choice);
         return true;
     }

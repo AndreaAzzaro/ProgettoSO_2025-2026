@@ -63,13 +63,32 @@ bool evaluate_probability_event(int success_percentage_rate);
 
 /**
  * @brief Simula il trascorrere del tempo in base ai parametri della simulazione.
- * 
+ *
  * Trasforma i minuti/unità della simulazione in nanosecondi reali utilizzando nanosleep.
  * Gestisce automaticamente le interruzioni dovute ai segnali (EINTR).
- * 
+ *
  * @param units_to_wait Quantità di unità temporali da attendere.
  * @param nanoseconds_per_tick Fattore di conversione (NNANOSECS).
  */
 void simulate_time_passage(int units_to_wait, long nanoseconds_per_tick);
+
+/* ==========================================================================
+ *                         SEZIONE: PARSING SICURO
+ * ========================================================================== */
+
+/**
+ * @brief Converte una stringa in intero con validazione completa.
+ *
+ * A differenza di atoi(), questa funzione:
+ * - Verifica che la stringa sia un numero valido
+ * - Rileva overflow/underflow
+ * - Rileva caratteri non numerici
+ *
+ * @param str La stringa da convertire.
+ * @param out_value Puntatore dove salvare il valore convertito.
+ * @return true Se la conversione è riuscita.
+ * @return false Se la stringa non è un numero valido.
+ */
+bool safe_parse_int(const char *str, int *out_value);
 
 #endif /* UTILS_H */

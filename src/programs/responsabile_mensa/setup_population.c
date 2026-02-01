@@ -103,7 +103,10 @@ void launch_simulation_operators(MainSharedMemory *shared_memory_ptr) {
         for (int i = 0; i < station_operators[s]; i++) {
             pid_t pid = fork();
             if (pid == 0) {
-                setpgid(0, pgid); /* Assegna al PGID della stazione */
+                if (setpgid(0, pgid) == -1) {
+                    perror("[ERROR] setpgid fallita per operatore stazione");
+                    exit(EXIT_FAILURE);
+                }
                 exec_worker(shmid, s);
             } else if (pid > 0) {
                 if (i == 0) pgid = pid; /* Il primo figlio definisce il PGID del gruppo */
@@ -119,7 +122,10 @@ void launch_simulation_operators(MainSharedMemory *shared_memory_ptr) {
     for (int i = 0; i < num_cashiers; i++) {
         pid_t pid = fork();
         if (pid == 0) {
-            setpgid(0, cassa_pgid);
+            if (setpgid(0, cassa_pgid) == -1) {
+                perror("[ERROR] setpgid fallita per cassiere");
+                exit(EXIT_FAILURE);
+            }
             char shm_str[20];
             sprintf(shm_str, "%d", shmid);
             execl("./bin/operatore_cassa", "operatore_cassa", shm_str, (char *)NULL);
@@ -174,7 +180,10 @@ void launch_simulation_users(MainSharedMemory *shared_memory_ptr) {
             if (pid == 0) {
                 /* Aggancio al PGID globale degli utenti per segnali broadcast */
                 pid_t users_global_pgid = shared_memory_ptr->process_group_pids[GROUP_USERS];
-                setpgid(0, users_global_pgid);
+                if (setpgid(0, users_global_pgid) == -1) {
+                    perror("[ERROR] setpgid fallita per utente");
+                    exit(EXIT_FAILURE);
+                }
 
                 char shm_str[24], gsize_str[24], gindex_str[24], is_leader_str[8];
                 sprintf(shm_str, "%d", shmid);

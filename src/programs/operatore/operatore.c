@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
+#include <string.h>
 
 /* Includes del progetto */
 #include "operatore.h"
@@ -72,9 +73,17 @@ void init_operatore(StatoOperatore *operatore, int argc, char *argv[]) {
         fprintf(stderr, "Uso: %s <shm_id> <station_type>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
-    
-    operatore->shared_memory_id = atoi(argv[1]);
-    operatore->station_type = atoi(argv[2]);
+
+    if (!safe_parse_int(argv[1], &operatore->shared_memory_id)) {
+        fprintf(stderr, "[ERROR] shm_id non valido: '%s'\n", argv[1]);
+        exit(EXIT_FAILURE);
+    }
+
+    if (!safe_parse_int(argv[2], &operatore->station_type)) {
+        fprintf(stderr, "[ERROR] station_type non valido: '%s'\n", argv[2]);
+        exit(EXIT_FAILURE);
+    }
+
     operatore->assigned_post_index = -1;
     operatore->total_portions_served = 0;
     operatore->daily_breaks_taken = 0;
@@ -102,8 +111,9 @@ void run_operatore_simulation(StatoOperatore *operatore) {
 
         /* LOOP 2: Ciclo "Giornaliero" (Periodo di vigenza del timer Master) */
         while (local_daily_cycle_is_active) {
-            /* Acquisizione Postazione (Interrompibile) */
-            int res = reserve_sem(stazione_ptr->semaphore_set_id, STATION_SEM_AVAILABLE_POSTS);
+            /* Acquisizione Postazione (Interrompibile)
+             * Usa NO_UNDO per evitare ghost posts quando l'operatore muore dopo aver rilasciato manualmente */
+            int res = reserve_sem_no_undo(stazione_ptr->semaphore_set_id, STATION_SEM_AVAILABLE_POSTS);
             
             if (res != -1) {
                 is_at_work = 1; /* Turno iniziato */
@@ -163,30 +173,38 @@ void fase_lavoro_stazione(StatoOperatore *operatore, FoodDistributionStation *st
             SimulationMessage msg;
             /* Ricezione Ordine - Controllo esito esplicito */
             ssize_t result = receive_message_from_queue(stazione_ptr->message_queue_id, &msg, sizeof(StationPayload), MSG_TYPE_ORDER, 0);
-            
+
             if (result == -1) {
-                /* Se l'errore non è un'interruzione (EINTR), usciamo dal turno */
-                if (errno != EINTR) {
+                if (errno == EINTR) {
+                    /* Se interrotti da segnale, ri-controlliamo se il giorno è ancora attivo */
+                    if (!local_daily_cycle_is_active) {
+                        is_at_work = 0;
+                    }
+                    /* Altrimenti continuiamo il loop per riprovare */
+                } else {
+                    /* Altri errori: usciamo dal turno */
                     is_at_work = 0;
                 }
             } else {
-                StationPayload *payload = (StationPayload *)msg.message_text;
-                
+                /* Usa memcpy invece di cast diretto per evitare alignment issues */
+                StationPayload payload;
+                memcpy(&payload, msg.message_text, sizeof(StationPayload));
+
                 /* Verifica Disponibilità Porzioni */
                 reserve_sem(operatore->shm_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
                 bool available = false;
-                
+
                 if (operatore->station_type == 2) {
                     available = true; /* Caffè/Dessert sempre disponibili (?) o non decrementano */
-                } else if (stazione_ptr->portions[payload->dish_index] > 0) {
-                    stazione_ptr->portions[payload->dish_index]--;
+                } else if (stazione_ptr->portions[payload.dish_index] > 0) {
+                    stazione_ptr->portions[payload.dish_index]--;
                     available = true;
                 }
                 release_sem(operatore->shm_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
 
                 /* Simulazione Tempo e Feedback */
                 if (available) {
-                    payload->status = ORDER_STATUS_SERVED;
+                    payload.status = ORDER_STATUS_SERVED;
                     
                     /* [CONSEGNA 5.1] Calcolo tempo casuale nell'intorno ± variation% */
                     int variation = (operatore->station_type == 2) ? 80 : 50;
@@ -212,11 +230,14 @@ void fase_lavoro_stazione(StatoOperatore *operatore, FoodDistributionStation *st
                     release_sem(operatore->shm_ptr->semaphore_mutex_id, MUTEX_SIMULATION_STATS);
 
                 } else {
-                    payload->status = ORDER_STATUS_OUT_OF_STOCK;
+                    payload.status = ORDER_STATUS_OUT_OF_STOCK;
                 }
 
+                /* Copia la risposta modificata nel buffer prima dell'invio */
+                memcpy(msg.message_text, &payload, sizeof(StationPayload));
+
                 /* Risposta all'Utente */
-                msg.message_type = payload->user_pid;
+                msg.message_type = payload.user_pid;
                 send_message_to_queue(stazione_ptr->message_queue_id, &msg, sizeof(StationPayload), 0);
             }
         }
@@ -279,8 +300,21 @@ void setup_operatore_signals(void) {
     sa.sa_handler = handle_operatore_signals;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
-    sigaction(SIGUSR1, &sa, NULL); /* Pausa */
-    sigaction(SIGUSR2, &sa, NULL); /* Fine Giorno */
-    sigaction(SIGTERM, &sa, NULL); /* Fine Sim */
-    sigaction(SIGINT,  &sa, NULL); /* Interrupt manuale */
+
+    if (sigaction(SIGUSR1, &sa, NULL) == -1) {
+        perror("[ERROR] sigaction(SIGUSR1) fallita");
+        exit(EXIT_FAILURE);
+    }
+    if (sigaction(SIGUSR2, &sa, NULL) == -1) {
+        perror("[ERROR] sigaction(SIGUSR2) fallita");
+        exit(EXIT_FAILURE);
+    }
+    if (sigaction(SIGTERM, &sa, NULL) == -1) {
+        perror("[ERROR] sigaction(SIGTERM) fallita");
+        exit(EXIT_FAILURE);
+    }
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("[ERROR] sigaction(SIGINT) fallita");
+        exit(EXIT_FAILURE);
+    }
 }

@@ -19,7 +19,7 @@ COMMON_OBJ = $(patsubst $(SRC_DIR)/%.c, $(OBJ_DIR)/%.o, $(COMMON_SRC))
 # Target specifici
 TARGETS = responsabile_mensa operatore utente operatore_cassa add_users communication_disorder
 
-.PHONY: all clean dirs
+.PHONY: all clean dirs clean_ipc
 
 all: dirs $(addprefix $(BIN_DIR)/, $(TARGETS))
 	@rm -f statistics_report.csv
@@ -87,3 +87,7 @@ $(BIN_DIR)/communication_disorder: $(DISORDER_OBJ) $(COMMON_OBJ)
 
 clean:
 	rm -rf $(OBJ_DIR) $(BIN_DIR)
+
+clean_ipc:
+	@ipcrm -a
+	@echo "Risorse IPC rimosse correttamente."

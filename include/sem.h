@@ -215,4 +215,29 @@ int open_barrier_gate(int sem_id, int gate_idx);
  */
 int sync_child_start(int sem_id, int ready_idx, int gate_idx);
 
+/* ==========================================================================
+ *                   SEZIONE: PROTEZIONE DA SIGNAL HANDLER
+ * ========================================================================== */
+
+/**
+ * @brief Blocca il segnale SIGCHLD per prevenire race condition.
+ *
+ * Deve essere chiamata prima di accedere a strutture condivise che potrebbero
+ * essere modificate dal signal handler SIGCHLD (es. group_statuses, user_registry).
+ *
+ * @param oldset Puntatore dove salvare la vecchia maschera dei segnali.
+ * @return int 0 successo, -1 errore.
+ */
+int block_sigchld(sigset_t *oldset);
+
+/**
+ * @brief Ripristina la maschera dei segnali precedente.
+ *
+ * Deve essere chiamata dopo aver terminato l'accesso a strutture protette.
+ *
+ * @param oldset Maschera dei segnali da ripristinare.
+ * @return int 0 successo, -1 errore.
+ */
+int unblock_sigchld(const sigset_t *oldset);
+
 #endif /* SEM_H */

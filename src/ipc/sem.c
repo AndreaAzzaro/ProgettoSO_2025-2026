@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/ipc.h>
 #include <sys/sem.h>
@@ -179,7 +180,24 @@ int open_barrier_gate(int sem_id, int gate_idx) {
 
 /** Sincronizza un figlio: decrementa ready, attende gate=0. */
 int sync_child_start(int sem_id, int ready_idx, int gate_idx) {
-    /* Per le barriere usiamo NO_UNDO: il SIGCHLD del Master gestisce le morti */
-    if (reserve_sem_no_undo(sem_id, ready_idx) == -1) return -1;
+    /* Per le barriere usiamo SEM_UNDO: il kernel compensa automaticamente se il processo muore */
+    if (reserve_sem(sem_id, ready_idx) == -1) return -1;
     return wait_for_zero(sem_id, gate_idx);
+}
+
+/* ==========================================================================
+ *                   SEZIONE: PROTEZIONE DA SIGNAL HANDLER
+ * ========================================================================== */
+
+/** Blocca SIGCHLD per prevenire race condition con il signal handler. */
+int block_sigchld(sigset_t *oldset) {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGCHLD);
+    return sigprocmask(SIG_BLOCK, &set, oldset);
+}
+
+/** Ripristina la maschera dei segnali precedente. */
+int unblock_sigchld(const sigset_t *oldset) {
+    return sigprocmask(SIG_SETMASK, oldset, NULL);
 }

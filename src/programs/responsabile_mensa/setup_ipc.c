@@ -192,7 +192,8 @@ void initialize_cashier_checkout_message_queue(MainSharedMemory *shared_memory_p
 void initialize_control_structures(MainSharedMemory *shm_ptr) {
     shm_ptr->current_total_users = shm_ptr->configuration.quantities.number_of_initial_users;
     shm_ptr->add_users_flag = 0;
-    
+    shm_ptr->pending_add_users_count = 0;
+
     /* Coda di comunicazione Master <-> add_users.c */
     int msqid = create_message_queue(IPC_PRIVATE, IPC_CREAT | 0666);
     if (msqid == -1) {
