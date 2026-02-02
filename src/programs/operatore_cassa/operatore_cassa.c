@@ -224,8 +224,10 @@ void fase_lavoro_cassa(StatoCassiere *cassiere) {
                 release_sem(cassiere->shm_ptr->semaphore_mutex_id, MUTEX_SIMULATION_STATS);
 
                 /* [PUNTO 4.3] Simulazione Tempo di Servizio */
-                int varied_time = calculate_varied_time(avg_service_time, 20);
-                simulate_time_passage(varied_time, cassiere->shm_ptr->configuration.timings.nanoseconds_per_tick);
+                int varied_time_seconds = calculate_varied_time(avg_service_time, 20);
+                /* BUGFIX: avg_service_time è in SECONDI, nanoseconds_per_tick è per MINUTI */
+                long nanoseconds_per_second = cassiere->shm_ptr->configuration.timings.nanoseconds_per_tick / 60;
+                simulate_time_passage(varied_time_seconds, nanoseconds_per_second);
                 cassiere->total_customers_processed++;
 
                 /* Invio Ricevuta (Feedback all'Utente) */

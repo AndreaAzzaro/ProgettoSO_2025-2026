@@ -124,14 +124,18 @@ void run_simulation_loop(MainSharedMemory *shm) {
 
         if (shm->is_simulation_running || shm->statistics.reason_for_termination == TERMINATION_REASON_TIMEOUT) {
             /* Elaborazione richieste asincrone di espansione utenti */
+            int users_before_process = shm->current_total_users;
             process_add_users_requests(shm);
+            int users_after_process = shm->current_total_users;
 
-            /* Preparazione barriera mattutina per il giorno dopo */
-            int next_morning_count = shm->configuration.quantities.number_of_workers + 
-                                     shm->configuration.seats.seats_cash_desk + 
-                                     shm->current_total_users;
-            setup_barrier(shm->semaphore_sync_id, BARRIER_MORNING_READY, BARRIER_MORNING_GATE, next_morning_count);
-            
+            /* Preparazione barriera mattutina per il giorno dopo (solo se non ci sono stati add_users) */
+            if (users_before_process == users_after_process) {
+                int next_morning_count = shm->configuration.quantities.number_of_workers +
+                                         shm->configuration.seats.seats_cash_desk +
+                                         shm->current_total_users;
+                setup_barrier(shm->semaphore_sync_id, BARRIER_MORNING_READY, BARRIER_MORNING_GATE, next_morning_count);
+            }
+
             open_barrier_gate(shm->semaphore_sync_id, BARRIER_EVENING_GATE);
 
             /* Calcolo sprechi prima del report */
@@ -502,9 +506,11 @@ static void calculate_food_waste_and_teardown(MainSharedMemory *shm) {
     
     /* Nota: Anche caffè e dolci contano come waste se avanzano a fine turno */
     int coffee_waste = 0;
-    for (int i = 0; i < MAX_DISHES_PER_CATEGORY; i++) {
+    int total_coffee_dessert = shm->food_menu.number_of_dessert_courses + shm->food_menu.number_of_beverage_courses;
+    for (int i = 0; i < total_coffee_dessert; i++) {
         coffee_waste += shm->coffee_dessert_station.portions[i];
     }
+    printf("[DEBUG] Waste caffè/dolci: Contati %d tipi, Waste totale=%d porzioni\n", total_coffee_dessert, coffee_waste);
 
     /* Aggiornamento Statistiche Giornaliere */
     shm->statistics.daily_leftover_plates.first_course_count = first_waste;
@@ -547,8 +553,13 @@ static void perform_initial_daily_refill(MainSharedMemory *shm) {
     /* Caffè e Dessert */
     reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
     release_sem(shm->coffee_dessert_station.semaphore_set_id, STATION_SEM_REFILL_GATE);
-    for (int i = 0; i < MAX_DISHES_PER_CATEGORY; i++) {
-        shm->coffee_dessert_station.portions[i] = 100; /* Abbondante per caffè/dolci */
+    int total_coffee_dessert = shm->food_menu.number_of_dessert_courses + shm->food_menu.number_of_beverage_courses;
+    printf("[DEBUG] Refill caffè/dolci: Dolci=%d, Bevande=%d, Totale=%d, Quantità/tipo=%d\n",
+           shm->food_menu.number_of_dessert_courses, shm->food_menu.number_of_beverage_courses,
+           total_coffee_dessert, shm->configuration.thresholds.refill_amount_secondi);
+    for (int i = 0; i < total_coffee_dessert; i++) {
+        /* Usa lo stesso valore di refill dei secondi per coerenza */
+        shm->coffee_dessert_station.portions[i] = shm->configuration.thresholds.refill_amount_secondi;
     }
     reserve_sem(shm->coffee_dessert_station.semaphore_set_id, STATION_SEM_REFILL_GATE);
     release_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
@@ -570,6 +581,7 @@ static void process_add_users_requests(MainSharedMemory *shm) {
         /* Incrementa il contatore delle operazioni pendenti */
         reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
         shm->pending_add_users_count += processed;
+        int users_before_add = shm->current_total_users;
         release_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
 
         /* Rilascia il permesso per ogni richiesta */
@@ -583,9 +595,19 @@ static void process_add_users_requests(MainSharedMemory *shm) {
         while (1) {
             reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
             int pending = shm->pending_add_users_count;
+            int users_after_add = shm->current_total_users;
             release_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
 
-            if (pending == 0) break;
+            if (pending == 0) {
+                /* Riconfigura la barriera mattutina con il nuovo conteggio utenti */
+                int next_morning_count = shm->configuration.quantities.number_of_workers +
+                                        shm->configuration.seats.seats_cash_desk +
+                                        users_after_add;
+                setup_barrier(shm->semaphore_sync_id, BARRIER_MORNING_READY, BARRIER_MORNING_GATE, next_morning_count);
+                printf("[MASTER] Barriera mattutina riconfigurata: %d -> %d utenti totali (%+d nuovi)\n",
+                       users_before_add, users_after_add, users_after_add - users_before_add);
+                break;
+            }
 
             usleep(10000); /* 10ms di attesa tra i controlli */
         }

@@ -194,9 +194,7 @@ void fase_lavoro_stazione(StatoOperatore *operatore, FoodDistributionStation *st
                 reserve_sem(operatore->shm_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
                 bool available = false;
 
-                if (operatore->station_type == 2) {
-                    available = true; /* Caffè/Dessert sempre disponibili (?) o non decrementano */
-                } else if (stazione_ptr->portions[payload.dish_index] > 0) {
+                if (stazione_ptr->portions[payload.dish_index] > 0) {
                     stazione_ptr->portions[payload.dish_index]--;
                     available = true;
                 }
@@ -205,12 +203,15 @@ void fase_lavoro_stazione(StatoOperatore *operatore, FoodDistributionStation *st
                 /* Simulazione Tempo e Feedback */
                 if (available) {
                     payload.status = ORDER_STATUS_SERVED;
-                    
+
                     /* [CONSEGNA 5.1] Calcolo tempo casuale nell'intorno ± variation% */
                     int variation = (operatore->station_type == 2) ? 80 : 50;
-                    int varied_time = calculate_varied_time(avg_service_time, variation);
-                    
-                    simulate_time_passage(varied_time, operatore->shm_ptr->configuration.timings.nanoseconds_per_tick); 
+                    int varied_time_seconds = calculate_varied_time(avg_service_time, variation);
+
+                    /* BUGFIX: avg_service_time è in SECONDI, ma nanoseconds_per_tick è per MINUTI
+                     * Convertiamo: nanoseconds_per_tick / 60 = nanoseconds_per_second */
+                    long nanoseconds_per_second = operatore->shm_ptr->configuration.timings.nanoseconds_per_tick / 60;
+                    simulate_time_passage(varied_time_seconds, nanoseconds_per_second); 
                     operatore->total_portions_served++;
 
                     /* Aggiornamento Statistiche Globali (PROTEZIONE MUTEX_SIMULATION_STATS) */

@@ -179,30 +179,34 @@ void register_user_in_registry(MainSharedMemory *shm, pid_t pid, int group_index
     }
 }
 
-void spawn_single_user(MainSharedMemory *shm, int shmid, int group_size, 
+void spawn_single_user(MainSharedMemory *shm, int shmid, int group_size,
                        int sync_index, int member_index) {
     pid_t pid = fork();
 
-    if (pid == 0) {
-        if (setpgid(0, shm->process_group_pids[GROUP_USERS]) == -1) {
-            perror("[ERROR] setpgid fallita");
+    switch (pid) {
+        case -1:
+            perror("[ERROR] fork fallita");
+            break;
+
+        case 0:
+            if (setpgid(0, shm->process_group_pids[GROUP_USERS]) == -1) {
+                perror("[ERROR] setpgid fallita");
+                exit(EXIT_FAILURE);
+            }
+
+            char shm_str[24], gsize_str[24], gindex_str[24], is_leader_str[8];
+            sprintf(shm_str, "%d", shmid);
+            sprintf(gsize_str, "%d", group_size);
+            sprintf(gindex_str, "%d", sync_index);
+            sprintf(is_leader_str, "%d", (member_index == 0));
+
+            execl("./bin/utente", "utente", shm_str, gsize_str, gindex_str, is_leader_str, (char *)NULL);
+            perror("[ERROR] execl fallita");
             exit(EXIT_FAILURE);
-        }
 
-        char shm_str[24], gsize_str[24], gindex_str[24], is_leader_str[8];
-        sprintf(shm_str, "%d", shmid);
-        sprintf(gsize_str, "%d", group_size);
-        sprintf(gindex_str, "%d", sync_index);
-        sprintf(is_leader_str, "%d", (member_index == 0));
-
-        execl("./bin/utente", "utente", shm_str, gsize_str, gindex_str, is_leader_str, (char *)NULL);
-        perror("[ERROR] execl fallita");
-        exit(EXIT_FAILURE);
-        
-    } else if (pid > 0) {
-        register_user_in_registry(shm, pid, sync_index);
-    } else {
-        perror("[ERROR] fork fallita");
+        default:
+            register_user_in_registry(shm, pid, sync_index);
+            break;
     }
 }
 

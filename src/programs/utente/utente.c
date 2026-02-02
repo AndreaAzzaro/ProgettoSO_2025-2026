@@ -184,9 +184,11 @@ void fase_validazione_ticket(StatoUtente *utente) {
         if (reserve_sem_interruptible(utente->shm_ptr->semaphore_ticket_id, 0) != -1) {
             if (local_daily_cycle_is_active) {
                 int avg_ticket_time = utente->shm_ptr->configuration.timings.average_service_time_ticket;
-                int varied_time = calculate_varied_time(avg_ticket_time, 20);
-                
-                simulate_time_passage(varied_time, utente->shm_ptr->configuration.timings.nanoseconds_per_tick);
+                int varied_time_seconds = calculate_varied_time(avg_ticket_time, 20);
+
+                /* BUGFIX: avg_ticket_time è in SECONDI, nanoseconds_per_tick è per MINUTI */
+                long nanoseconds_per_second = utente->shm_ptr->configuration.timings.nanoseconds_per_tick / 60;
+                simulate_time_passage(varied_time_seconds, nanoseconds_per_second);
                 utente->ticket_is_validated = true;
                 printf("[UTENTE] PID %d: Ticket validato.\n", getpid());
             }
@@ -235,11 +237,29 @@ bool fase_servizio_stazione(StatoUtente *utente, int stazione_tipo) {
     }
     release_sem(utente->shm_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
 
-    /* Check soglia pazienza (coda IPC) */
+    /* Check soglia pazienza (coda IPC) con threshold dinamico */
     int q_len = get_message_queue_length(stazione->message_queue_id);
-    if (q_len > utente->shm_ptr->configuration.thresholds.queue_patience_threshold) {
-        printf("[UTENTE] PID %d: Troppa coda alla stazione %s (%d utenti). Salto.\n", 
-               getpid(), (stazione_tipo == 0 ? "Primi" : "Secondi"), q_len);
+
+    /* Threshold dinamico: scala aggressivamente con NNANOSECS per compensare overhead IPC */
+    int base_threshold = utente->shm_ptr->configuration.thresholds.queue_patience_threshold;
+    int dynamic_threshold = base_threshold;
+
+    long nnanosecs = utente->shm_ptr->configuration.timings.nanoseconds_per_tick;
+
+    /* Scala il threshold in modo aggressivo per simulazioni veloci */
+    if (nnanosecs < 20000) {
+        /* Simulazione molto veloce: threshold = 10x utenti per compensare overhead estremi */
+        int min_threshold = utente->shm_ptr->current_total_users * 10;
+        dynamic_threshold = (base_threshold > min_threshold) ? base_threshold : min_threshold;
+    } else if (nnanosecs < 100000) {
+        /* Simulazione veloce: threshold = 4x utenti */
+        int min_threshold = utente->shm_ptr->current_total_users * 4;
+        dynamic_threshold = (base_threshold > min_threshold) ? base_threshold : min_threshold;
+    }
+
+    if (q_len > dynamic_threshold) {
+        printf("[UTENTE] PID %d: Troppa coda alla stazione %s (%d utenti, threshold=%d). Salto.\n",
+               getpid(), (stazione_tipo == 0 ? "Primi" : "Secondi"), q_len, dynamic_threshold);
         return false;
     }
 
@@ -401,11 +421,11 @@ void fase_consumazione_pasto(StatoUtente *utente, bool p1, bool p2) {
 
 void fase_servizio_caffe(StatoUtente *utente) {
     /* [FIX] Permettiamo il caffè anche se il timer è scaduto, purché il pasto sia finito */
-    
+
     FoodDistributionStation *stazione = &utente->shm_ptr->coffee_dessert_station;
     int choice = utente->selected_dessert_coffee_index;
 
-    printf("[UTENTE] PID %d: Coda Caffè/Dolce...\n", getpid());
+    printf("[UTENTE] PID %d: Coda Caffè/Dolce... (indice scelto: %d)\n", getpid(), choice);
     fase_checkout_piatto(utente, stazione, &choice, 2); /* 2: Caffè */
 }
 
@@ -484,10 +504,12 @@ void genera_identita_casuale(StatoUtente *utente) {
     int n_primi = utente->shm_ptr->food_menu.number_of_first_courses;
     int n_secondi = utente->shm_ptr->food_menu.number_of_second_courses;
     int n_desserts = utente->shm_ptr->food_menu.number_of_dessert_courses;
+    int n_beverages = utente->shm_ptr->food_menu.number_of_beverage_courses;
+    int total_coffee_dessert = n_desserts + n_beverages;
 
     utente->selected_first_course_index = (n_primi > 0) ? generate_random_integer(0, n_primi - 1) : -1;
     utente->selected_second_course_index = (n_secondi > 0) ? generate_random_integer(0, n_secondi - 1) : -1;
-    utente->selected_dessert_coffee_index = (n_desserts > 0) ? generate_random_integer(0, n_desserts - 1) : -1;
+    utente->selected_dessert_coffee_index = (total_coffee_dessert > 0) ? generate_random_integer(0, total_coffee_dessert - 1) : -1;
     
     utente->group_patience_threshold = generate_random_integer(30, 120);
 }

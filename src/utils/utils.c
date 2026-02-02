@@ -84,6 +84,10 @@ bool evaluate_probability_event(int success_percentage_rate) {
 /**
  * Simula il passaggio del tempo convertendo unità simulate in nanosleep.
  * Gestisce automaticamente le interruzioni da segnale (EINTR).
+ *
+ * NOTA: Con simulazioni molto veloci (NNANOSECS < 20000), i tempi possono essere
+ * sotto la risoluzione del kernel (~1μs). In questi casi, non dormiamo per evitare
+ * problemi di timing e permettere la massima velocità di elaborazione.
  */
 void simulate_time_passage(int units_to_wait, long nanoseconds_per_tick) {
     if (units_to_wait <= 0) return;
@@ -91,10 +95,17 @@ void simulate_time_passage(int units_to_wait, long nanoseconds_per_tick) {
     struct timespec requested_time;
     long total_nanoseconds = (long)units_to_wait * nanoseconds_per_tick;
 
+    /* Con simulazioni molto veloci, i tempi sono sotto la risoluzione del kernel.
+     * Minimo pratico: 1 microsecondo (1000 nanosecondi).
+     * Se il tempo è minore, non dormiamo per permettere la massima velocità. */
+    if (total_nanoseconds < 1000) {
+        return; /* Skip sleep per tempi troppo piccoli */
+    }
+
     /* Conversione in secondi e nanosecondi per struct timespec */
     requested_time.tv_sec = total_nanoseconds / 1000000000L;
     requested_time.tv_nsec = total_nanoseconds % 1000000000L;
-    
+
     /* Loop robusto per nanosleep: riprende se interrotto da EINTR */
     while (nanosleep(&requested_time, &requested_time) == -1) {
         if (errno != EINTR) {
