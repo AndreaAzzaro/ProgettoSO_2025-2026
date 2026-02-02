@@ -12,6 +12,7 @@
 /* Includes di sistema */
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
@@ -38,14 +39,22 @@ static volatile sig_atomic_t daily_cycle_is_active = 0;
 /** Flag atomica per la richiesta di refill asincrono. */
 static volatile sig_atomic_t refill_requested = 0;
 
+/** Flag atomica per terminazione d'emergenza (SIGINT/SIGTERM). */
+static volatile sig_atomic_t termination_requested = 0;
+
+/** Flag atomica per notifica SIGCHLD (BUG-16: deferred reaping). */
+static volatile sig_atomic_t sigchld_received = 0;
+
 /** Riferimento globale alla SHM per gli handler dei segnali. */
 static MainSharedMemory *global_shm_ref = NULL;
 
 /** Timer ID per il timer giornaliero (per evitare leak). */
-static timer_t daily_timer_id = 0;
+static timer_t daily_timer_id;
+static bool daily_timer_active = false;
 
 /** Timer ID per il timer di refill (per evitare leak). */
-static timer_t refill_timer_id = 0;
+static timer_t refill_timer_id;
+static bool refill_timer_active = false;
 
 /* ==========================================================================
  *                       SEZIONE: PROTOTIPI PRIVATI
@@ -57,6 +66,7 @@ static void handle_add_users_request(int sig);
 static void handle_refill_signal(int sig);
 static void handle_sigchld(int sig);
 
+static void reap_dead_children(MainSharedMemory *shm);
 static void reset_daily_statistics(MainSharedMemory *shm);
 static void calculate_food_waste_and_teardown(MainSharedMemory *shm);
 static void perform_initial_daily_refill(MainSharedMemory *shm);
@@ -72,102 +82,159 @@ void run_simulation_loop(MainSharedMemory *shm) {
 
     /* LOOP SETTIMANALE: Gestione dei simulation_duration_days */
     while (shm->is_simulation_running && shm->current_simulation_day < shm->configuration.timings.simulation_duration_days) {
-        
+
         /* 1. Fase Preparazione Giorno */
-        while (shm->is_simulation_running && wait_for_zero(shm->semaphore_sync_id, BARRIER_MORNING_READY) == -1) {
-            if (errno != EINTR) break;
-        }
-        if (!shm->is_simulation_running) break;
-
-        printf("[MASTER] --- INIZIO GIORNO %d ---\n", shm->current_simulation_day + 1);
-
-        reset_daily_statistics(shm);
-        perform_initial_daily_refill(shm);
-        setup_group_barriers(shm);
-        setup_refill_signal();
-
-        /* Setup barriera serale in base alla popolazione attuale */
-        int evening_count = shm->configuration.quantities.number_of_workers + 
-                            shm->configuration.seats.seats_cash_desk + 
-                            shm->current_total_users;
-        setup_barrier(shm->semaphore_sync_id, BARRIER_EVENING_READY, BARRIER_EVENING_GATE, evening_count);
-
-        /* 2. Fase Operativa Attiva */
-        daily_cycle_is_active = 1;
-        arm_daily_timer(shm);
-        open_barrier_gate(shm->semaphore_sync_id, BARRIER_MORNING_GATE);
-
-        while (daily_cycle_is_active && shm->is_simulation_running) {
-            pause(); /* Attesa segnali (Timer, Refill, Emergenza) */
-
-            if (refill_requested && shm->is_simulation_running) {
-                handle_refill_cycle(shm);
-                refill_requested = 0;
-                setup_refill_signal(); /* Ri-arma per il prossimo evento casuale */
+        int morning_ok = 0;
+        while (shm->is_simulation_running && !morning_ok) {
+            if (wait_for_zero(shm->semaphore_sync_id, BARRIER_MORNING_READY) == 0) {
+                morning_ok = 1;
+            } else if (errno != EINTR) {
+                morning_ok = -1; /* Errore non recuperabile */
             }
         }
 
-        /* 3. Fase Chiusura Giorno */
-        if (shm->current_simulation_day + 1 >= shm->configuration.timings.simulation_duration_days) {
-            shm->is_simulation_running = 0;
-            shm->statistics.reason_for_termination = TERMINATION_REASON_TIMEOUT;
-        }
+        if (shm->is_simulation_running && morning_ok > 0) {
+            printf("[MASTER] --- INIZIO GIORNO %d ---\n", shm->current_simulation_day + 1);
 
-        /* Notifica figli (Fine turno o Fine Simulazione) */
-        int end_sig = (shm->is_simulation_running) ? SIGUSR2 : SIGTERM;
-        broadcast_signal_to_all_groups(shm, end_sig);
+            reset_daily_statistics(shm);
+            perform_initial_daily_refill(shm);
+            setup_group_barriers(shm);
+            setup_refill_signal();
 
-        /* Sincronizzazione serale (Sempre dovuta per permettere ai figli di finire) */
-        while (wait_for_zero(shm->semaphore_sync_id, BARRIER_EVENING_READY) == -1) {
-            if (errno != EINTR) break;
-        }
-
-        if (shm->is_simulation_running || shm->statistics.reason_for_termination == TERMINATION_REASON_TIMEOUT) {
-            /* Elaborazione richieste asincrone di espansione utenti */
-            int users_before_process = shm->current_total_users;
-            process_add_users_requests(shm);
-            int users_after_process = shm->current_total_users;
-
-            /* Preparazione barriera mattutina per il giorno dopo (solo se non ci sono stati add_users) */
-            if (users_before_process == users_after_process) {
-                int next_morning_count = shm->configuration.quantities.number_of_workers +
-                                         shm->configuration.seats.seats_cash_desk +
-                                         shm->current_total_users;
-                setup_barrier(shm->semaphore_sync_id, BARRIER_MORNING_READY, BARRIER_MORNING_GATE, next_morning_count);
+            /* BUG-15/16: Raccoglie figli morti prima di usare current_total_users */
+            if (sigchld_received) {
+                reap_dead_children(shm);
+                sigchld_received = 0;
             }
 
-            open_barrier_gate(shm->semaphore_sync_id, BARRIER_EVENING_GATE);
+            /* Setup barriera serale in base alla popolazione attuale */
+            int evening_count = shm->configuration.quantities.number_of_workers +
+                                shm->configuration.seats.seats_cash_desk +
+                                shm->current_total_users;
+            setup_barrier(shm->semaphore_sync_id, BARRIER_EVENING_READY, BARRIER_EVENING_GATE, evening_count);
 
-            /* Calcolo sprechi prima del report */
-            calculate_food_waste_and_teardown(shm);
+            /* 2. Fase Operativa Attiva */
+            daily_cycle_is_active = 1;
+            arm_daily_timer(shm);
+            open_barrier_gate(shm->semaphore_sync_id, BARRIER_MORNING_GATE);
 
-            /* Reporting */
-            SimulationStatistics daily_stats = collect_simulation_statistics(shm);
-            
-            /* Controllo OVERLOAD (Sez 5.6 della Consegna) */
-            if (daily_stats.clients_statistics.daily_clients_not_served > shm->configuration.thresholds.overload_threshold) {
-                printf("[MASTER] TERMINAZIONE PER OVERLOAD: %d utenti rinunciatari oggi (Soglia: %d)\n", 
-                       daily_stats.clients_statistics.daily_clients_not_served,
-                       shm->configuration.thresholds.overload_threshold);
+            while (daily_cycle_is_active && shm->is_simulation_running) {
+                pause(); /* Attesa segnali (Timer, Refill, Emergenza, SIGCHLD) */
+
+                /* BUG-15/16: Reap figli morti nel contesto normale */
+                if (sigchld_received) {
+                    reap_dead_children(shm);
+                    sigchld_received = 0;
+                }
+
+                if (refill_requested && shm->is_simulation_running) {
+                    handle_refill_cycle(shm);
+                    refill_requested = 0;
+                    setup_refill_signal(); /* Ri-arma per il prossimo evento casuale */
+                }
+            }
+
+            /* 3. Gestione terminazione d'emergenza (SIGINT/SIGTERM) */
+            if (termination_requested) {
+                printf("\n[SIGNAL] Ricevuto segnale di terminazione. Cleanup in corso...\n");
+                shm->statistics.reason_for_termination = TERMINATION_REASON_SIGNAL;
                 shm->is_simulation_running = 0;
-                shm->statistics.reason_for_termination = TERMINATION_REASON_OVERLOAD;
+                broadcast_signal_to_all_groups(shm, SIGTERM);
             }
 
-            display_daily_statistics_report(daily_stats, shm->current_simulation_day);
-            save_statistics_to_csv(daily_stats, shm->current_simulation_day, "statistics_report.csv");
-            
-            shm->current_simulation_day++;
-            printf("[MASTER] --- FINE GIORNO %d ---\n", shm->current_simulation_day);
+            if (!termination_requested) {
+                /* 4. Fase Chiusura Giorno */
+                if (shm->current_simulation_day + 1 >= shm->configuration.timings.simulation_duration_days) {
+                    shm->is_simulation_running = 0;
+                    shm->statistics.reason_for_termination = TERMINATION_REASON_TIMEOUT;
+                }
+
+                /* Notifica figli (Fine turno o Fine Simulazione) */
+                int end_sig = (shm->is_simulation_running) ? SIGUSR2 : SIGTERM;
+                broadcast_signal_to_all_groups(shm, end_sig);
+
+                /* BUG-15/16: Reap prima della sincronizzazione serale */
+                if (sigchld_received) {
+                    reap_dead_children(shm);
+                    sigchld_received = 0;
+                }
+
+                /* Sincronizzazione serale (Sempre dovuta per permettere ai figli di finire) */
+                int evening_wait_ok = 1;
+                while (evening_wait_ok && wait_for_zero(shm->semaphore_sync_id, BARRIER_EVENING_READY) == -1) {
+                    if (errno != EINTR) {
+                        evening_wait_ok = 0;
+                    } else {
+                        /* BUG-15/16: Reap durante attesa serale */
+                        if (sigchld_received) {
+                            reap_dead_children(shm);
+                            sigchld_received = 0;
+                        }
+                    }
+                }
+
+                if (shm->is_simulation_running || shm->statistics.reason_for_termination == TERMINATION_REASON_TIMEOUT) {
+                    /* Elaborazione richieste asincrone di espansione utenti */
+                    int users_before_process = shm->current_total_users;
+                    process_add_users_requests(shm);
+                    int users_after_process = shm->current_total_users;
+
+                    /* Preparazione barriera mattutina per il giorno dopo (solo se non ci sono stati add_users) */
+                    if (users_before_process == users_after_process) {
+                        int next_morning_count = shm->configuration.quantities.number_of_workers +
+                                                 shm->configuration.seats.seats_cash_desk +
+                                                 shm->current_total_users;
+                        setup_barrier(shm->semaphore_sync_id, BARRIER_MORNING_READY, BARRIER_MORNING_GATE, next_morning_count);
+                    }
+
+                    open_barrier_gate(shm->semaphore_sync_id, BARRIER_EVENING_GATE);
+
+                    /* Calcolo sprechi prima del report */
+                    calculate_food_waste_and_teardown(shm);
+
+                    /* Reporting */
+                    SimulationStatistics daily_stats = collect_simulation_statistics(shm);
+
+                    /* Controllo OVERLOAD (Sez 5.6 della Consegna) */
+                    if (daily_stats.clients_statistics.daily_clients_not_served > shm->configuration.thresholds.overload_threshold) {
+                        printf("[MASTER] TERMINAZIONE PER OVERLOAD: %d utenti rinunciatari oggi (Soglia: %d)\n",
+                               daily_stats.clients_statistics.daily_clients_not_served,
+                               shm->configuration.thresholds.overload_threshold);
+                        shm->is_simulation_running = 0;
+                        shm->statistics.reason_for_termination = TERMINATION_REASON_OVERLOAD;
+                    }
+
+                    display_daily_statistics_report(daily_stats, shm->current_simulation_day);
+                    save_statistics_to_csv(daily_stats, shm->current_simulation_day, "statistics_report.csv");
+
+                    shm->current_simulation_day++;
+                    printf("[MASTER] --- FINE GIORNO %d ---\n", shm->current_simulation_day);
+                } else {
+                    /* Percorso di uscita anticipata: apriamo il cancello per liberare i figli */
+                    open_barrier_gate(shm->semaphore_sync_id, BARRIER_EVENING_GATE);
+                }
+            }
         }
-        
-        /* Apriamo sempre il cancello serale per liberare i figli (sia a metà simulazione che alla fine) */
-        open_barrier_gate(shm->semaphore_sync_id, BARRIER_EVENING_GATE);
     }
 
     /* 4. Fine Simulazione */
+
+    /* BUG-25 FIX: Elimina i timer POSIX per evitare SIGALRM/SIGRTMIN+1 stale durante lo shutdown */
+    if (daily_timer_active) {
+        timer_delete(daily_timer_id);
+        daily_timer_active = false;
+    }
+    if (refill_timer_active) {
+        timer_delete(refill_timer_id);
+        refill_timer_active = false;
+    }
+
+    /* Ultimo reaping di eventuali figli terminati durante lo shutdown */
+    reap_dead_children(shm);
+
     usleep(500000); /* Breve attesa per permettere ai figli di stampare i log di chiusura */
     printf("\n[MASTER] Elaborazione report finale in corso...\n");
-    
+
     SimulationStatistics final_stats = collect_simulation_statistics(shm);
     display_final_simulation_report(final_stats, shm->current_simulation_day);
 }
@@ -178,10 +245,12 @@ void handle_refill_cycle(MainSharedMemory *shm) {
 
     simulate_time_passage(varied_refill_time, shm->configuration.timings.nanoseconds_per_tick);
 
+    /* BUG-19 FIX: Usa il numero effettivo di piatti dal menu, non MAX_DISHES_PER_CATEGORY */
+
     /* Refill Primi */
     reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
     release_sem(shm->first_course_station.semaphore_set_id, STATION_SEM_REFILL_GATE);
-    for (int i = 0; i < MAX_DISHES_PER_CATEGORY; i++) {
+    for (int i = 0; i < shm->food_menu.number_of_first_courses; i++) {
         shm->first_course_station.portions[i] += shm->configuration.thresholds.refill_amount_primi;
         if (shm->first_course_station.portions[i] > shm->configuration.thresholds.maximum_portions_primi) {
             shm->first_course_station.portions[i] = shm->configuration.thresholds.maximum_portions_primi;
@@ -193,13 +262,26 @@ void handle_refill_cycle(MainSharedMemory *shm) {
     /* Refill Secondi */
     reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
     release_sem(shm->second_course_station.semaphore_set_id, STATION_SEM_REFILL_GATE);
-    for (int i = 0; i < MAX_DISHES_PER_CATEGORY; i++) {
+    for (int i = 0; i < shm->food_menu.number_of_second_courses; i++) {
         shm->second_course_station.portions[i] += shm->configuration.thresholds.refill_amount_secondi;
         if (shm->second_course_station.portions[i] > shm->configuration.thresholds.maximum_portions_secondi) {
             shm->second_course_station.portions[i] = shm->configuration.thresholds.maximum_portions_secondi;
         }
     }
     reserve_sem(shm->second_course_station.semaphore_set_id, STATION_SEM_REFILL_GATE);
+    release_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
+
+    /* BUG-18 FIX: Refill Caffè/Dolci (mai riforniti mid-day prima di questo fix) */
+    reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
+    release_sem(shm->coffee_dessert_station.semaphore_set_id, STATION_SEM_REFILL_GATE);
+    int total_coffee_dessert = shm->food_menu.number_of_dessert_courses + shm->food_menu.number_of_beverage_courses;
+    for (int i = 0; i < total_coffee_dessert; i++) {
+        shm->coffee_dessert_station.portions[i] += shm->configuration.thresholds.refill_amount_secondi;
+        if (shm->coffee_dessert_station.portions[i] > shm->configuration.thresholds.maximum_portions_secondi) {
+            shm->coffee_dessert_station.portions[i] = shm->configuration.thresholds.maximum_portions_secondi;
+        }
+    }
+    reserve_sem(shm->coffee_dessert_station.semaphore_set_id, STATION_SEM_REFILL_GATE);
     release_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
 
     printf("[MASTER] Refill completato in %d min.\n", varied_refill_time);
@@ -211,9 +293,9 @@ void arm_daily_timer(MainSharedMemory *shm) {
     struct sigaction sa;
 
     /* Elimina il timer precedente se esiste per evitare leak */
-    if (daily_timer_id != 0) {
+    if (daily_timer_active) {
         timer_delete(daily_timer_id);
-        daily_timer_id = 0;
+        daily_timer_active = false;
     }
 
     sa.sa_handler = handle_daily_cycle_end;
@@ -231,6 +313,7 @@ void arm_daily_timer(MainSharedMemory *shm) {
         perror("[ERROR] timer_create(daily) fallita");
         exit(EXIT_FAILURE);
     }
+    daily_timer_active = true;
 
     long long meal_ns = (long long)shm->configuration.timings.meal_duration_minutes *
                          shm->configuration.timings.nanoseconds_per_tick;
@@ -295,9 +378,9 @@ void setup_refill_signal(void) {
     struct sigaction sa;
 
     /* Elimina il timer precedente se esiste per evitare leak */
-    if (refill_timer_id != 0) {
+    if (refill_timer_active) {
         timer_delete(refill_timer_id);
-        refill_timer_id = 0;
+        refill_timer_active = false;
     }
 
     sa.sa_handler = handle_refill_signal;
@@ -315,6 +398,7 @@ void setup_refill_signal(void) {
         perror("[ERROR] timer_create(refill) fallita");
         exit(EXIT_FAILURE);
     }
+    refill_timer_active = true;
 
     /* [CONSEGNA 5.2] Trigger refill ogni 10 minuti simulati */
     int trigger_minutes = 10;
@@ -359,56 +443,18 @@ static void handle_daily_cycle_end(int sig) {
 
 static void handle_emergency_termination(int sig) {
     (void)sig;
-
-    /* Nota: Questo handler non è completamente signal-safe (chiama printf, wait, cleanup),
-     * ma per scopi pratici è accettabile dato che è un handler di terminazione definitiva.
-     * Alternative più robuste richiederebbero self-pipe trick o signalfd. */
-
-    /* Blocca segnali aggiuntivi durante il cleanup per evitare interruzioni */
-    sigset_t mask, oldmask;
-    sigfillset(&mask);
-    sigprocmask(SIG_SETMASK, &mask, &oldmask);
-
-    printf("\n[SIGNAL] Ricevuto segnale di terminazione (SIGINT/SIGTERM). Cleanup in corso...\n");
-
+    termination_requested = 1;
+    daily_cycle_is_active = 0;
     if (global_shm_ref != NULL) {
         global_shm_ref->is_simulation_running = 0;
-        global_shm_ref->statistics.reason_for_termination = TERMINATION_REASON_SIGNAL;
-        daily_cycle_is_active = 0;
-
-        /* Notifica tutti i processi figli della terminazione */
-        printf("[SIGNAL] Notifica ai processi figli...\n");
-        broadcast_signal_to_all_groups(global_shm_ref, SIGTERM);
-
-        /* Attende che tutti i figli terminino (con timeout implicito via SIGCHLD) */
-        printf("[SIGNAL] Attesa terminazione processi figli...\n");
-        int child_count = 0;
-        pid_t pid;
-        /* Attende fino a 2 secondi per i figli, poi procede comunque */
-        alarm(2);
-        while ((pid = wait(NULL)) > 0) {
-            child_count++;
-        }
-        alarm(0);
-        printf("[SIGNAL] %d processi figli terminati.\n", child_count);
-
-        /* Se ci sono ancora processi figli ribelli, usciamo comunque
-         * Le risorse IPC verranno marcate per rimozione e il kernel le pulirà */
-
-        /* Rimuove tutte le risorse IPC */
-        printf("[SIGNAL] Rimozione risorse IPC...\n");
-        cleanup_ipc_resources(global_shm_ref);
-        printf("[SIGNAL] Cleanup completato.\n");
     }
-
-    /* Ripristina maschera segnali e termina */
-    sigprocmask(SIG_SETMASK, &oldmask, NULL);
-    exit(EXIT_SUCCESS);
 }
 
 static void handle_add_users_request(int sig) {
     (void)sig;
-    if (global_shm_ref != NULL) global_shm_ref->add_users_flag = 1;
+    /* BUG-26 FIX: Rimosso accesso a shm->add_users_flag (data race cross-processo).
+     * Il flag è già impostato da add_users.c sotto mutex prima di inviare SIGUSR1.
+     * Questo handler serve solo a svegliare il master da pause(). */
 }
 
 static void handle_refill_signal(int sig) {
@@ -418,50 +464,68 @@ static void handle_refill_signal(int sig) {
 
 static void handle_sigchld(int sig) {
     (void)sig;
+    /* BUG-16 FIX: Solo flag async-signal-safe. Il reaping e l'aggiornamento
+     * dei metadati avviene nel main loop sotto mutex (reap_dead_children). */
+    sigchld_received = 1;
+}
+
+/**
+ * @brief Raccoglie i processi figli terminati e aggiorna i metadati.
+ *
+ * BUG-15 FIX: Decrementa current_total_users per utenti morti.
+ * BUG-16 FIX: Eseguita nel contesto normale (non signal handler) con mutex.
+ */
+static void reap_dead_children(MainSharedMemory *shm) {
     int status;
     pid_t pid;
 
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
-        if (global_shm_ref != NULL) {
-            /*
-             * Compensazione barriere rimossa: ora usiamo SEM_UNDO sui semafori delle barriere,
-             * quindi il kernel compensa automaticamente quando un processo muore.
-             *
-             * NOTA OPERATORI: Gli operatori usano reserve_sem_no_undo() per STATION_SEM_AVAILABLE_POSTS
-             * per evitare il problema dei "ghost posts" (doppio incremento se muoiono dopo release manuale).
-             * Trade-off: se un operatore viene ucciso brutalmente prima di rilasciare il posto,
-             * quel posto rimane occupato. Questo è accettabile in una simulazione dove gli operatori
-             * terminano normalmente. Una soluzione completa richiederebbe un operator_registry con
-             * tracking dello stato "sta tenendo un posto" per ogni operatore.
-             */
+        /*
+         * Compensazione barriere rimossa: ora usiamo SEM_UNDO sui semafori delle barriere,
+         * quindi il kernel compensa automaticamente quando un processo muore.
+         */
 
-            /* Aggiornamento metadati gruppi */
-            for (int r = 0; r < MAX_USERS_REGISTRY; r++) {
-                if (global_shm_ref->user_registry[r].pid == pid) {
-                    int g_idx = global_shm_ref->user_registry[r].group_index;
+        /* Aggiornamento metadati gruppi sotto mutex */
+        reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
+        int found = 0;
+        for (int r = 0; r < MAX_USERS_REGISTRY && !found; r++) {
+            if (shm->user_registry[r].pid == pid) {
+                int g_idx = shm->user_registry[r].group_index;
 
-                    if (global_shm_ref->group_statuses[g_idx].active_members > 0) {
-                        global_shm_ref->group_statuses[g_idx].active_members--;
-                    }
-
-                    /*
-                     * Compensazione semafori di gruppo rimossa: SEM_UNDO compensa automaticamente
-                     * quando il processo muore, evitando double-decrement.
-                     */
-
-                    if (global_shm_ref->group_statuses[g_idx].group_leader_pid == pid) {
-                        global_shm_ref->group_statuses[g_idx].group_leader_pid = 0;
-                    }
-
-                    global_shm_ref->user_registry[r].pid = 0;
-                    break;
+                if (shm->group_statuses[g_idx].active_members > 0) {
+                    shm->group_statuses[g_idx].active_members--;
                 }
+
+                if (shm->group_statuses[g_idx].group_leader_pid == pid) {
+                    shm->group_statuses[g_idx].group_leader_pid = 0;
+                }
+
+                shm->user_registry[r].pid = 0;
+
+                /* BUG-15 FIX: Decrementa il conteggio utenti totali */
+                if (shm->current_total_users > 0) {
+                    shm->current_total_users--;
+                }
+
+                found = 1;
             }
         }
+        release_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
     }
 }
 
+static void flush_station_queue(int queue_id) {
+    SimulationMessage discard;
+    while (receive_message_from_queue(queue_id, &discard, MAX_MESSAGE_TEXT_SIZE, 0, IPC_NOWAIT) != -1);
+}
+
 static void reset_daily_statistics(MainSharedMemory *shm) {
+    /* Svuota le code delle stazioni da messaggi orfani del giorno precedente */
+    flush_station_queue(shm->first_course_station.message_queue_id);
+    flush_station_queue(shm->second_course_station.message_queue_id);
+    flush_station_queue(shm->coffee_dessert_station.message_queue_id);
+    flush_station_queue(shm->register_station.message_queue_id);
+
     reserve_sem(shm->semaphore_mutex_id, MUTEX_SIMULATION_STATS);
     
     /* Reset Utenti Giornalieri */
@@ -532,10 +596,12 @@ static void calculate_food_waste_and_teardown(MainSharedMemory *shm) {
 
 
 static void perform_initial_daily_refill(MainSharedMemory *shm) {
+    /* BUG-19 FIX: Usa il numero effettivo di piatti dal menu, non MAX_DISHES_PER_CATEGORY */
+
     /* Primi */
     reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
     release_sem(shm->first_course_station.semaphore_set_id, STATION_SEM_REFILL_GATE);
-    for (int i = 0; i < MAX_DISHES_PER_CATEGORY; i++) {
+    for (int i = 0; i < shm->food_menu.number_of_first_courses; i++) {
         shm->first_course_station.portions[i] = shm->configuration.thresholds.refill_amount_primi;
     }
     reserve_sem(shm->first_course_station.semaphore_set_id, STATION_SEM_REFILL_GATE);
@@ -544,7 +610,7 @@ static void perform_initial_daily_refill(MainSharedMemory *shm) {
     /* Secondi */
     reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
     release_sem(shm->second_course_station.semaphore_set_id, STATION_SEM_REFILL_GATE);
-    for (int i = 0; i < MAX_DISHES_PER_CATEGORY; i++) {
+    for (int i = 0; i < shm->food_menu.number_of_second_courses; i++) {
         shm->second_course_station.portions[i] = shm->configuration.thresholds.refill_amount_secondi;
     }
     reserve_sem(shm->second_course_station.semaphore_set_id, STATION_SEM_REFILL_GATE);
@@ -591,8 +657,10 @@ static void process_add_users_requests(MainSharedMemory *shm) {
 
         printf("[MASTER] Elaborati %d blocchi add_users. Attesa completamento spawn...\n", processed);
 
-        /* Aspetta che tutte le operazioni add_users completino lo spawn */
-        while (1) {
+        /* BUG-20 FIX: Aspetta con timeout (max ~10s) per evitare spin infinito se add_users muore */
+        int max_wait_iterations = 1000; /* 1000 * 10ms = 10 secondi */
+        int pending_done = 0;
+        while (max_wait_iterations-- > 0 && !pending_done) {
             reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
             int pending = shm->pending_add_users_count;
             int users_after_add = shm->current_total_users;
@@ -606,10 +674,24 @@ static void process_add_users_requests(MainSharedMemory *shm) {
                 setup_barrier(shm->semaphore_sync_id, BARRIER_MORNING_READY, BARRIER_MORNING_GATE, next_morning_count);
                 printf("[MASTER] Barriera mattutina riconfigurata: %d -> %d utenti totali (%+d nuovi)\n",
                        users_before_add, users_after_add, users_after_add - users_before_add);
-                break;
+                pending_done = 1;
+            } else {
+                usleep(10000); /* 10ms di attesa tra i controlli */
             }
+        }
 
-            usleep(10000); /* 10ms di attesa tra i controlli */
+        if (!pending_done) {
+            /* Timeout: forza reset del contatore pendente e prosegui */
+            printf("[WARNING] Timeout attesa add_users. Forzatura reset pending_count.\n");
+            reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
+            shm->pending_add_users_count = 0;
+            int users_after_add = shm->current_total_users;
+            release_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
+
+            int next_morning_count = shm->configuration.quantities.number_of_workers +
+                                    shm->configuration.seats.seats_cash_desk +
+                                    users_after_add;
+            setup_barrier(shm->semaphore_sync_id, BARRIER_MORNING_READY, BARRIER_MORNING_GATE, next_morning_count);
         }
 
         printf("[MASTER] Spawn utenti completato. Aggiornamento barriere...\n");

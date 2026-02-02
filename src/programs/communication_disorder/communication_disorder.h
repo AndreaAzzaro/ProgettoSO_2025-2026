@@ -19,12 +19,6 @@
  * ========================================================================== */
 
 /**
- * @brief Connette alla memoria condivisa della simulazione tramite ftok.
- * @return 0 successo, -1 errore.
- */
-int connect_to_simulation(MainSharedMemory **shm_out, int *shmid_out);
-
-/**
  * @brief Esegue il ciclo di blocco e sblocco delle casse.
  * @param duration_seconds Durata del blocco in secondi reali.
  */

@@ -110,6 +110,8 @@ void launch_simulation_operators(MainSharedMemory *shared_memory_ptr) {
                 exec_worker(shmid, s);
             } else if (pid > 0) {
                 if (i == 0) pgid = pid; /* Il primo figlio definisce il PGID del gruppo */
+                /* BUG-21 FIX: setpgid lato parent per evitare race POSIX */
+                setpgid(pid, pgid);
             }
         }
         shared_memory_ptr->process_group_pids[groups[s]] = pgid;
@@ -133,6 +135,8 @@ void launch_simulation_operators(MainSharedMemory *shared_memory_ptr) {
             exit(EXIT_FAILURE);
         } else if (pid > 0) {
             if (i == 0) cassa_pgid = pid;
+            /* BUG-21 FIX: setpgid lato parent per evitare race POSIX */
+            setpgid(pid, cassa_pgid);
         }
     }
     shared_memory_ptr->process_group_pids[GROUP_CASHIERS] = cassa_pgid;
@@ -196,15 +200,19 @@ void launch_simulation_users(MainSharedMemory *shared_memory_ptr) {
                 exit(EXIT_FAILURE);
             } else if (pid > 0) {
                 /* Registrazione nel registro di sistema per gestione zombie e deadlock */
+                sigset_t oldset;
+                block_sigchld(&oldset);
                 reserve_sem(shared_memory_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
-                for (int r = 0; r < MAX_USERS_REGISTRY; r++) {
+                int registered = 0;
+                for (int r = 0; r < MAX_USERS_REGISTRY && !registered; r++) {
                     if (shared_memory_ptr->user_registry[r].pid == 0) {
                         shared_memory_ptr->user_registry[r].pid = pid;
                         shared_memory_ptr->user_registry[r].group_index = current_sync_index;
-                        break;
+                        registered = 1;
                     }
                 }
                 release_sem(shared_memory_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
+                unblock_sigchld(&oldset);
 
                 /* Definizione PGID globale basato sul primissimo utente creato */
                 if (shared_memory_ptr->process_group_pids[GROUP_USERS] == 0) {

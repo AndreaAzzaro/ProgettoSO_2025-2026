@@ -179,7 +179,7 @@ void fase_lavoro_cassa(StatoCassiere *cassiere) {
         /* Se wait ha successo (0) o se fallisce ma NON per interruzione segnale (es. errore grave, ignoriamo per ora), procediamo.
            Se wait fallisce per EINTR, il loop ricomincerebbe. Per evitare continue, usiamo un if grande. */
         
-        if (wait_res == 0 || (wait_res == -1 && errno != EINTR)) {
+        if (wait_res == 0) {
             /* Ricezione Dati Pagamento (MSQ Cassa) */
             ssize_t result = receive_message_from_queue(cassiere->shm_ptr->register_station.message_queue_id,
                                                        &msg, sizeof(CashierPayload), MSG_TYPE_ORDER, 0);
@@ -211,13 +211,7 @@ void fase_lavoro_cassa(StatoCassiere *cassiere) {
                     amount *= 0.5;
                 }
 
-                /* [PUNTO 4.2] Aggiornamento Incassi (Protezione Mutex) */
-                reserve_sem(cassiere->shm_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
-                cassiere->shm_ptr->register_station.daily_income += amount;
-                cassiere->shm_ptr->register_station.total_income += amount;
-                release_sem(cassiere->shm_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
-
-                /* Aggiornamento Statistiche Globali (PROTEZIONE MUTEX_SIMULATION_STATS) */
+                /* [PUNTO 4.2] Aggiornamento Statistiche Incassi (PROTEZIONE MUTEX_SIMULATION_STATS) */
                 reserve_sem(cassiere->shm_ptr->semaphore_mutex_id, MUTEX_SIMULATION_STATS);
                 cassiere->shm_ptr->statistics.income_statistics.current_daily_income += amount;
                 cassiere->shm_ptr->statistics.income_statistics.accumulated_total_income += amount;

@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 #include <sys/wait.h>
 
 /* Includes del progetto */
@@ -29,6 +31,26 @@ MainSharedMemory* attach_to_simulation_shared_memory(int shared_memory_id) {
         exit(EXIT_FAILURE);
     }
     return shm_ptr;
+}
+
+int connect_to_simulation(MainSharedMemory **shm_out, int *shmid_out) {
+    key_t key = ftok(IPC_KEY_PATH, IPC_PROJECT_ID);
+    if (key == -1) {
+        perror("[ERROR] ftok fallita. Assicurati che config/config.conf esista");
+        return -1;
+    }
+
+    int shmid = shmget(key, 0, 0);
+    if (shmid == -1) {
+        fprintf(stderr, "[ERROR] Impossibile trovare la memoria condivisa.\n");
+        fprintf(stderr, "La simulazione è stata avviata?\n");
+        return -1;
+    }
+
+    *shm_out = attach_to_simulation_shared_memory(shmid);
+    *shmid_out = shmid;
+
+    return 0;
 }
 
 /* ==========================================================================
@@ -52,6 +74,13 @@ void cleanup_ipc_resources(MainSharedMemory *shared_memory_ptr) {
     delete_sem_set(shared_memory_ptr->first_course_station.semaphore_set_id);
     delete_sem_set(shared_memory_ptr->second_course_station.semaphore_set_id);
     delete_sem_set(shared_memory_ptr->coffee_dessert_station.semaphore_set_id);
+    delete_sem_set(shared_memory_ptr->register_station.semaphore_set_id);
+
+    /* 2b. Pool semafori gruppi */
+    delete_sem_set(shared_memory_ptr->group_sync_semaphore_id);
+
+    /* 2c. Coda di controllo add_users */
+    remove_message_queue(shared_memory_ptr->control_queue_id);
 
     /* 3. Risorse globali (barriere, mutex, ticket, posti) */
     delete_sem_set(shared_memory_ptr->semaphore_sync_id);

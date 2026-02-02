@@ -41,6 +41,7 @@ int main(int argc, char *argv[]) {
     if (connect_to_simulation(&shm, &shmid) != 0) {
         return EXIT_FAILURE;
     }
+    srand(time(NULL) ^ getpid());
 
     /* 2. Parsing numero utenti */
     int users_to_add = parse_users_count(argc, argv, shm);
@@ -78,27 +79,6 @@ int find_free_group_index(MainSharedMemory *shm) {
     return -1;
 }
 
-int connect_to_simulation(MainSharedMemory **shm_out, int *shmid_out) {
-    key_t key = ftok(IPC_KEY_PATH, IPC_PROJECT_ID);
-    if (key == -1) {
-        perror("[ERROR] ftok fallita. Assicurati che config/config.conf esista");
-        return -1;
-    }
-
-    int shmid = shmget(key, 0, 0);
-    if (shmid == -1) {
-        fprintf(stderr, "[ERROR] Impossibile trovare la memoria condivisa.\n");
-        fprintf(stderr, "La simulazione è stata avviata?\n");
-        return -1;
-    }
-
-    *shm_out = attach_to_simulation_shared_memory(shmid);
-    *shmid_out = shmid;
-    srand(time(NULL) ^ getpid());
-    
-    return 0;
-}
-
 int parse_users_count(int argc, char *argv[], MainSharedMemory *shm) {
     int users_to_add;
 
@@ -134,7 +114,11 @@ int send_add_users_request(MainSharedMemory *shm, int users_count) {
         return -1;
     }
 
+    /* BUG-26 FIX: Protegge add_users_flag con mutex */
+    reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
     shm->add_users_flag = 1;
+    release_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
+
     if (kill(shm->master_pid, SIGUSR1) == -1) {
         perror("[ERROR] Segnale SIGUSR1 al Master fallito");
         return -1;
@@ -162,12 +146,11 @@ void register_user_in_registry(MainSharedMemory *shm, pid_t pid, int group_index
     reserve_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
 
     bool registered = false;
-    for (int r = 0; r < MAX_USERS_REGISTRY; r++) {
+    for (int r = 0; r < MAX_USERS_REGISTRY && !registered; r++) {
         if (shm->user_registry[r].pid == 0) {
             shm->user_registry[r].pid = pid;
             shm->user_registry[r].group_index = group_index;
             registered = true;
-            break;
         }
     }
 
@@ -214,7 +197,8 @@ int spawn_user_groups(MainSharedMemory *shm, int shmid, int total_users) {
     int users_spawned = 0;
     sigset_t oldset;
 
-    while (users_spawned < total_users) {
+    int pool_saturated = 0;
+    while (users_spawned < total_users && !pool_saturated) {
         int group_size = (rand() % MAX_USERS_PER_GROUP) + 1;
         if (users_spawned + group_size > total_users) {
             group_size = total_users - users_spawned;
@@ -228,19 +212,19 @@ int spawn_user_groups(MainSharedMemory *shm, int shmid, int total_users) {
             fprintf(stderr, "[ERROR] Pool gruppi saturo.\n");
             release_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
             unblock_sigchld(&oldset);
-            break;
+            pool_saturated = 1;
+        } else {
+            shm->group_statuses[sync_index].active_members = group_size;
+            shm->group_statuses[sync_index].group_leader_pid = 0;
+            release_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
+            unblock_sigchld(&oldset);
+
+            for (int i = 0; i < group_size; i++) {
+                spawn_single_user(shm, shmid, group_size, sync_index, i);
+            }
+
+            users_spawned += group_size;
         }
-
-        shm->group_statuses[sync_index].active_members = group_size;
-        shm->group_statuses[sync_index].group_leader_pid = 0;
-        release_sem(shm->semaphore_mutex_id, MUTEX_SHARED_DATA);
-        unblock_sigchld(&oldset);
-
-        for (int i = 0; i < group_size; i++) {
-            spawn_single_user(shm, shmid, group_size, sync_index, i);
-        }
-
-        users_spawned += group_size;
     }
 
     /* Aggiorna il contatore degli utenti totali con il numero effettivo di utenti creati */

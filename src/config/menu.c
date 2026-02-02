@@ -60,7 +60,8 @@ static const MenuCategoryKeyMap menu_category_mapping_table[] = {
 static MenuCategoryKey resolve_menu_category_key(const char *key_string) {
     MenuCategoryKey identified_category = CATEGORY_KEY_UNKNOWN;
     int i = 0;
-    while (menu_category_mapping_table[i].character_key != NULL) {
+    /* BUG-27 FIX: Short-circuit on match via loop condition */
+    while (menu_category_mapping_table[i].character_key != NULL && identified_category == CATEGORY_KEY_UNKNOWN) {
         if (strcmp(key_string, menu_category_mapping_table[i].character_key) == 0) {
             identified_category = menu_category_mapping_table[i].enum_identifier;
         }

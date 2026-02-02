@@ -108,8 +108,6 @@ typedef struct {
 typedef struct {
     int message_queue_id;               /**< ID della coda di messaggi per i pagamenti */
     int semaphore_set_id;               /**< ID del set di semafori (Cassa) */
-    double daily_income;                /**< Incasso specifico della giornata corrente */
-    double total_income;                /**< Incasso totale accumulato nella simulazione */
 } CashierStation;
 
 /* ==========================================================================
@@ -221,6 +219,14 @@ typedef struct MainSharedMemory MainSharedMemory;
  * @return MainSharedMemory* Puntatore all'area di memoria, termina il processo su errore.
  */
 MainSharedMemory* attach_to_simulation_shared_memory(int shared_memory_id);
+
+/**
+ * @brief Connette un processo esterno alla memoria condivisa della simulazione tramite ftok.
+ * @param shm_out Puntatore dove salvare il riferimento alla SHM.
+ * @param shmid_out Puntatore dove salvare l'ID della SHM.
+ * @return 0 successo, -1 errore.
+ */
+int connect_to_simulation(MainSharedMemory **shm_out, int *shmid_out);
 
 /**
  * @brief Esegue la pulizia di tutte le risorse IPC allocate.

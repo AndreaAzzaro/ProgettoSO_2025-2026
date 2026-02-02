@@ -28,12 +28,6 @@
 int find_free_group_index(MainSharedMemory *shm);
 
 /**
- * @brief Connette alla memoria condivisa della simulazione tramite ftok.
- * @return 0 successo, -1 errore.
- */
-int connect_to_simulation(MainSharedMemory **shm_out, int *shmid_out);
-
-/**
  * @brief Parsing del numero di utenti da aggiungere.
  * @return Numero utenti (>0) o -1 se errore.
  */

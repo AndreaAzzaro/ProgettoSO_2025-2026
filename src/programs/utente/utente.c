@@ -219,11 +219,10 @@ bool fase_servizio_stazione(StatoUtente *utente, int stazione_tipo) {
                         utente->shm_ptr->food_menu.number_of_second_courses;
         
         bool found_alt = false;
-        for (int i = 0; i < num_dishes; i++) {
+        for (int i = 0; i < num_dishes && !found_alt; i++) {
             if (stazione->portions[i] > 0) {
                 choice = i;
                 found_alt = true;
-                break;
             }
         }
 
@@ -282,10 +281,18 @@ void fase_ritiro_formale(StatoUtente *utente) {
     release_sem(utente->shm_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
 
     /*
-     * Compensazione semafori di gruppo rimossa: ora usiamo SEM_UNDO sui semafori di gruppo
-     * (vedi reserve_sem_interruptible), quindi il kernel compensa automaticamente quando
-     * il processo esce, evitando double-decrement.
+     * Compensazione semafori di gruppo: l'utente che abbandona non raggiungerà mai
+     * fase_riunione_gruppo e fase_uscita_collettiva, quindi i semafori PRE_CASHIER
+     * e EXIT non verranno decrementati dalla sua parte. Decrementiamo qui per
+     * evitare che i membri rimanenti restino bloccati alla barriera.
+     * Usiamo reserve_sem_no_undo per evitare che SEM_UNDO ri-incrementi
+     * il semaforo quando il processo esce.
      */
+    if (utente->group_size > 1) {
+        int base_sem = s_idx * GROUP_SEMS_PER_ENTRY;
+        reserve_sem_no_undo(utente->shm_ptr->group_sync_semaphore_id, base_sem + GROUP_SEM_PRE_CASHIER);
+        reserve_sem_no_undo(utente->shm_ptr->group_sync_semaphore_id, base_sem + GROUP_SEM_EXIT);
+    }
 }
 
 void fase_riunione_gruppo(StatoUtente *utente) {
@@ -358,18 +365,17 @@ void fase_prenotazione_tavolo(StatoUtente *utente) {
         while (local_daily_cycle_is_active && !found) {
             reserve_sem(utente->shm_ptr->semaphore_mutex_id, MUTEX_TABLES);
             
-            for (int i = 0; i < utente->shm_ptr->seat_area.active_tables_count; i++) {
+            for (int i = 0; i < utente->shm_ptr->seat_area.active_tables_count && !found; i++) {
                 Table *t = &utente->shm_ptr->seat_area.tables[i];
                 if ((t->capacity - t->occupied_seats) >= members) {
                     t->occupied_seats += members;
                     utente->assigned_table_id = i;
-                    
+
                     reserve_sem(utente->shm_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
                     utente->shm_ptr->group_statuses[s_idx].assigned_table_id = i;
                     release_sem(utente->shm_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
-                    
+
                     found = true;
-                    break;
                 }
             }
             
@@ -424,6 +430,9 @@ void fase_servizio_caffe(StatoUtente *utente) {
 
     FoodDistributionStation *stazione = &utente->shm_ptr->coffee_dessert_station;
     int choice = utente->selected_dessert_coffee_index;
+
+    /* BUG-22 FIX: Se nessun caffè/dolce nel menu, non inviare ordini con indice -1 */
+    if (choice < 0) return;
 
     printf("[UTENTE] PID %d: Coda Caffè/Dolce... (indice scelto: %d)\n", getpid(), choice);
     fase_checkout_piatto(utente, stazione, &choice, 2); /* 2: Caffè */
@@ -522,12 +531,11 @@ ssize_t receive_message_with_soft_timeout(int queue_id, SimulationMessage *msg, 
         if (res != -1) {
             return res;
         }
-        /* Se interrotto da segnale, rientra nel loop e ricontrolla local_daily_cycle_is_active */
-        if (errno == EINTR) {
-            continue;
+        /* Se non interrotto da segnale, è un errore fatale */
+        if (errno != EINTR) {
+            return -1;
         }
-        /* Altri errori sono fatali */
-        return -1;
+        /* Se interrotto da segnale (EINTR), il loop ricontrolla local_daily_cycle_is_active */
     }
     return -1;
 }

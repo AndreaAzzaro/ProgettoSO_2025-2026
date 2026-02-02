@@ -165,7 +165,7 @@ void fase_lavoro_stazione(StatoOperatore *operatore, FoodDistributionStation *st
         /* [DESIGN] Probabilità spontanea di richiedere pausa tra un cliente e l'altro */
         if (generate_random_integer(1, 100) <= 25) {
             is_at_work = 0;
-            break;
+            /* Il loop si chiude naturalmente: condizione is_at_work diventa falsa */
         }
         /* Check Cancello Refill */
         if (wait_for_zero(stazione_ptr->semaphore_set_id, STATION_SEM_REFILL_GATE) != -1) {
@@ -190,48 +190,53 @@ void fase_lavoro_stazione(StatoOperatore *operatore, FoodDistributionStation *st
                 StationPayload payload;
                 memcpy(&payload, msg.message_text, sizeof(StationPayload));
 
-                /* Verifica Disponibilità Porzioni */
-                reserve_sem(operatore->shm_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
-                bool available = false;
-
-                if (stazione_ptr->portions[payload.dish_index] > 0) {
-                    stazione_ptr->portions[payload.dish_index]--;
-                    available = true;
-                }
-                release_sem(operatore->shm_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
-
-                /* Simulazione Tempo e Feedback */
-                if (available) {
-                    payload.status = ORDER_STATUS_SERVED;
-
-                    /* [CONSEGNA 5.1] Calcolo tempo casuale nell'intorno ± variation% */
-                    int variation = (operatore->station_type == 2) ? 80 : 50;
-                    int varied_time_seconds = calculate_varied_time(avg_service_time, variation);
-
-                    /* BUGFIX: avg_service_time è in SECONDI, ma nanoseconds_per_tick è per MINUTI
-                     * Convertiamo: nanoseconds_per_tick / 60 = nanoseconds_per_second */
-                    long nanoseconds_per_second = operatore->shm_ptr->configuration.timings.nanoseconds_per_tick / 60;
-                    simulate_time_passage(varied_time_seconds, nanoseconds_per_second); 
-                    operatore->total_portions_served++;
-
-                    /* Aggiornamento Statistiche Globali (PROTEZIONE MUTEX_SIMULATION_STATS) */
-                    reserve_sem(operatore->shm_ptr->semaphore_mutex_id, MUTEX_SIMULATION_STATS);
-                    if (operatore->station_type == 0) {
-                        operatore->shm_ptr->statistics.daily_served_plates.first_course_count++;
-                        operatore->shm_ptr->statistics.total_served_plates.first_course_count++;
-                    } else if (operatore->station_type == 1) {
-                        operatore->shm_ptr->statistics.daily_served_plates.second_course_count++;
-                        operatore->shm_ptr->statistics.total_served_plates.second_course_count++;
-                    } else {
-                        operatore->shm_ptr->statistics.daily_served_plates.coffee_dessert_count++;
-                        operatore->shm_ptr->statistics.total_served_plates.coffee_dessert_count++;
-                    }
-                    operatore->shm_ptr->statistics.daily_served_plates.total_plates_count++;
-                    operatore->shm_ptr->statistics.total_served_plates.total_plates_count++;
-                    release_sem(operatore->shm_ptr->semaphore_mutex_id, MUTEX_SIMULATION_STATS);
-
-                } else {
+                /* BUG-23 FIX: Validazione dish_index da messaggio non fidato */
+                if (payload.dish_index < 0 || payload.dish_index >= MAX_DISHES_PER_CATEGORY) {
                     payload.status = ORDER_STATUS_OUT_OF_STOCK;
+                } else {
+                    /* Verifica Disponibilità Porzioni */
+                    reserve_sem(operatore->shm_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
+                    bool available = false;
+
+                    if (stazione_ptr->portions[payload.dish_index] > 0) {
+                        stazione_ptr->portions[payload.dish_index]--;
+                        available = true;
+                    }
+                    release_sem(operatore->shm_ptr->semaphore_mutex_id, MUTEX_SHARED_DATA);
+
+                    /* Simulazione Tempo e Feedback */
+                    if (available) {
+                        payload.status = ORDER_STATUS_SERVED;
+
+                        /* [CONSEGNA 5.1] Calcolo tempo casuale nell'intorno ± variation% */
+                        int variation = (operatore->station_type == 2) ? 80 : 50;
+                        int varied_time_seconds = calculate_varied_time(avg_service_time, variation);
+
+                        /* BUGFIX: avg_service_time è in SECONDI, ma nanoseconds_per_tick è per MINUTI
+                         * Convertiamo: nanoseconds_per_tick / 60 = nanoseconds_per_second */
+                        long nanoseconds_per_second = operatore->shm_ptr->configuration.timings.nanoseconds_per_tick / 60;
+                        simulate_time_passage(varied_time_seconds, nanoseconds_per_second);
+                        operatore->total_portions_served++;
+
+                        /* Aggiornamento Statistiche Globali (PROTEZIONE MUTEX_SIMULATION_STATS) */
+                        reserve_sem(operatore->shm_ptr->semaphore_mutex_id, MUTEX_SIMULATION_STATS);
+                        if (operatore->station_type == 0) {
+                            operatore->shm_ptr->statistics.daily_served_plates.first_course_count++;
+                            operatore->shm_ptr->statistics.total_served_plates.first_course_count++;
+                        } else if (operatore->station_type == 1) {
+                            operatore->shm_ptr->statistics.daily_served_plates.second_course_count++;
+                            operatore->shm_ptr->statistics.total_served_plates.second_course_count++;
+                        } else {
+                            operatore->shm_ptr->statistics.daily_served_plates.coffee_dessert_count++;
+                            operatore->shm_ptr->statistics.total_served_plates.coffee_dessert_count++;
+                        }
+                        operatore->shm_ptr->statistics.daily_served_plates.total_plates_count++;
+                        operatore->shm_ptr->statistics.total_served_plates.total_plates_count++;
+                        release_sem(operatore->shm_ptr->semaphore_mutex_id, MUTEX_SIMULATION_STATS);
+
+                    } else {
+                        payload.status = ORDER_STATUS_OUT_OF_STOCK;
+                    }
                 }
 
                 /* Copia la risposta modificata nel buffer prima dell'invio */

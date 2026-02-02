@@ -23,6 +23,7 @@
 #include "common.h"
 #include "shm.h"
 #include "sem.h"
+#include "utils.h"
 #include "communication_disorder.h"
 
 /* ==========================================================================
@@ -59,26 +60,6 @@ int main(int argc, char *argv[]) {
  *                    SEZIONE: IMPLEMENTAZIONE FUNZIONI
  * ========================================================================== */
 
-int connect_to_simulation(MainSharedMemory **shm_out, int *shmid_out) {
-    key_t key = ftok(IPC_KEY_PATH, IPC_PROJECT_ID);
-    if (key == -1) {
-        perror("[ERROR] ftok fallita. Assicurati che config/config.conf esista");
-        return -1;
-    }
-
-    int shmid = shmget(key, 0, 0);
-    if (shmid == -1) {
-        fprintf(stderr, "[ERROR] Impossibile trovare la memoria condivisa.\n");
-        fprintf(stderr, "La simulazione è stata avviata?\n");
-        return -1;
-    }
-
-    *shm_out = attach_to_simulation_shared_memory(shmid);
-    *shmid_out = shmid;
-    
-    return 0;
-}
-
 void trigger_disorder(MainSharedMemory *shm, int duration_seconds) {
     /* 1. Blocco casse: V() sul semaforo stop */
     printf("[DISORDER] ATTIVAZIONE BLOCCO CASSE...\n");
@@ -87,10 +68,10 @@ void trigger_disorder(MainSharedMemory *shm, int duration_seconds) {
         return;
     }
     
-    printf("[DISORDER] Casse BLOCCATE. Attesa di %d secondi...\n", duration_seconds);
+    printf("[DISORDER] Casse BLOCCATE. Durata guasto: %d minuti simulati.\n", duration_seconds);
 
-    /* 2. Attesa (simulazione durata guasto) */
-    sleep(duration_seconds);
+    /* 2. Attesa (simulazione durata guasto in tempo simulato) */
+    simulate_time_passage(duration_seconds, shm->configuration.timings.nanoseconds_per_tick);
 
     /* 3. Ripristino casse: P() sul semaforo stop */
     printf("[DISORDER] RIPRISTINO CASSE...\n");

@@ -1,3 +1,0 @@
-day,daily_srv,daily_not_srv,daily_tk,daily_notk,total_srv,total_not_srv,daily_plate_1,daily_plate_2,daily_plate_c,total_plate_1,total_plate_2,total_plate_c,waste_1,waste_2,avg_wait_1_day,avg_wait_1_tot,avg_wait_c_day,avg_wait_c_tot,ops_active,ops_breaks_tot,income_day,income_tot
-1,40,0,33,7,40,0,40,40,17,40,40,17,400,400,7.34,7.34,7.19,7.19,25,0,305.50,305.50
-2,40,0,29,11,80,0,40,40,40,80,80,57,400,400,12.30,9.82,13.31,10.25,25,21,331.50,637.00
